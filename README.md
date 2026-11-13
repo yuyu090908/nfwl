@@ -8,7 +8,7 @@ UE5で作る5対5のリアル3Dオンラインサッカー。設計の正本は 
 
 | 項目 | 内容 |
 | --- | --- |
-| Unreal Engine | 5.6 系を想定（他の5.x でも可。開くときに版を選び直せばよい） |
+| Unreal Engine | 5.8 系を想定（他の5.x でも可。開くときに版を選び直せばよい） |
 | Mac | Xcode（App Store 版）と Command Line Tools |
 | Windows | Visual Studio 2022（「C++によるゲーム開発」ワークロード） |
 | Git | Git LFS（`git lfs install`） |
