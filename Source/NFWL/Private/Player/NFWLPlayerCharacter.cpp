@@ -473,10 +473,10 @@ ANFWLBall* ANFWLPlayerCharacter::FindBall()
 	{
 		return CachedBall.Get();
 	}
-	for (TActorIterator<ANFWLBall> It(GetWorld()); It; ++It)
+	TActorIterator<ANFWLBall> It(GetWorld());
+	if (It)
 	{
 		CachedBall = *It;
-		return *It;
 	}
-	return nullptr;
+	return CachedBall.Get();
 }
