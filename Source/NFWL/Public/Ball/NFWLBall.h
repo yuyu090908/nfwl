@@ -31,8 +31,8 @@ public:
 	FVector GetBallVelocity() const;
 	void SetBallVelocity(const FVector& Velocity);
 
-	ANFWLPlayerCharacter* GetLastTouchedBy() const { return LastTouchedBy.Get(); }
-	void SetLastTouchedBy(ANFWLPlayerCharacter* Player) { LastTouchedBy = Player; }
+	ANFWLPlayerCharacter* GetLastTouchedBy() const;
+	void SetLastTouchedBy(ANFWLPlayerCharacter* Player);
 
 protected:
 	virtual void BeginPlay() override;

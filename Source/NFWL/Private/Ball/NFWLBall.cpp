@@ -79,3 +79,13 @@ void ANFWLBall::SetBallVelocity(const FVector& Velocity)
 {
 	Sphere->SetPhysicsLinearVelocity(Velocity);
 }
+
+ANFWLPlayerCharacter* ANFWLBall::GetLastTouchedBy() const
+{
+	return LastTouchedBy.Get();
+}
+
+void ANFWLBall::SetLastTouchedBy(ANFWLPlayerCharacter* Player)
+{
+	LastTouchedBy = Player;
+}
