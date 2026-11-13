@@ -7,6 +7,7 @@
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Core/NFWLTypes.h"
+#include "Player/NFWLPlayerCharacter.h"
 
 ANFWLBall::ANFWLBall()
 {
