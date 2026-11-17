@@ -19,13 +19,16 @@ namespace NFWL
         public SphereCollider Sphere { get; private set; }
         public PlayerController LastTouchedBy { get; set; }
 
+        /// <summary>The player dribbling or holding the ball, or null when it is loose.</summary>
+        public PlayerController Owner { get; set; }
+
         public static Ball Create()
         {
             GameObject go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             go.name = "Ball";
             // Unity's sphere is 1m wide with a 0.5m collider, so scaling keeps them in step.
             go.transform.localScale = Vector3.one * PitchDims.BallRadius * 2f;
-            go.GetComponent<Renderer>().material.color = Color.white;
+            go.GetComponent<Renderer>().sharedMaterial = Visuals.Mat(Color.white, 0.55f, Visuals.Ball);
             go.AddComponent<Rigidbody>();
             return go.AddComponent<Ball>();
         }
@@ -40,6 +43,7 @@ namespace NFWL
             Body.angularDamping = angularDamping;
             Body.interpolation = RigidbodyInterpolation.Interpolate;
             Body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            Body.maxAngularVelocity = 300f;
 
             PhysicsMaterial mat = new PhysicsMaterial("BallPhysMat")
             {
@@ -61,7 +65,9 @@ namespace NFWL
         public void Kick(Vector3 velocity, PlayerController kicker)
         {
             LastTouchedBy = kicker;
-            Body.angularVelocity = Vector3.zero;
+            Owner = null;
+            // Spin around the axis perpendicular to the flight, so the patches roll visibly.
+            Body.angularVelocity = Vector3.Cross(Vector3.up, velocity) / PitchDims.BallRadius;
             Body.linearVelocity = velocity;
         }
 
@@ -72,6 +78,18 @@ namespace NFWL
             Body.position = position;
             transform.position = position;
             LastTouchedBy = null;
+            Owner = null;
+        }
+
+        void FixedUpdate()
+        {
+            // While dribbled the ball is moved by setting its velocity, so roll it by hand.
+            Vector3 v = Body.linearVelocity;
+            v.y = 0f;
+            if (Owner != null && transform.position.y < 0.3f && v.sqrMagnitude > 0.01f)
+            {
+                Body.angularVelocity = Vector3.Cross(Vector3.up, v) / PitchDims.BallRadius;
+            }
         }
     }
 }

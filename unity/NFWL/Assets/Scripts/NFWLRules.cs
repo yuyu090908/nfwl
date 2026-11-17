@@ -49,7 +49,32 @@ namespace NFWL
         [Range(40, 99)] public int LongPass = 70;
         [Range(40, 99)] public int ShotPower = 70;
         [Range(40, 99)] public int Finishing = 70;
+        [Range(40, 99)] public int Tackling = 70;
+        [Range(40, 99)] public int Goalkeeping = 70;
+
+        /// <summary>Overall rating shown on the player card (simple average of the key abilities).</summary>
+        public int Overall(Role role)
+        {
+            if (role == Role.GK) return Mathf.RoundToInt(Goalkeeping * 0.7f + Agility * 0.15f + LongPass * 0.15f);
+            float v = (Speed + Acceleration + Agility + BallControl + ShortPass + LongPass + ShotPower + Finishing + Tackling) / 9f;
+            return Mathf.RoundToInt(v);
+        }
+
+        public static PlayerAttributes Random(int baseLevel, System.Random rnd)
+        {
+            int R() => Mathf.Clamp(baseLevel + rnd.Next(-8, 9), 40, 99);
+            return new PlayerAttributes
+            {
+                Speed = R(), Acceleration = R(), Agility = R(), BallControl = R(), ShortPass = R(),
+                LongPass = R(), ShotPower = R(), Finishing = R(), Tackling = R(), Goalkeeping = R()
+            };
+        }
     }
+
+    public enum Role { GK, DF, MF, FW }
+
+    /// <summary>NFT rarity tiers (Master Doc 7.4).</summary>
+    public enum Rarity { Common, Rare, Epic, Mythic, Legendary }
 
     public static class Rules
     {
