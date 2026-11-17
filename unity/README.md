@@ -1,7 +1,7 @@
 # NFWL Unity版（Phase 1 プロトタイプ）
 
-Unreal版（リポジトリ直下の Sprint01 コード）と同じ内容を Unity 6 で動くようにしたものです。
-Unreal版のファイルには手を加えていません。
+Unreal版 Phase 1（Sprint01）と同じ内容を Unity 6 で動くようにしたものです。
+Unity版はこの `unity/` フォルダにまとめてあり、ほかのファイルには手を加えていません。
 
 - Unityプロジェクトの場所：`unity/NFWL/`
 - 対応バージョン：Unity 6（6.3 LTS を推奨。6000.x ならどれでも開けます）
