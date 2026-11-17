@@ -54,10 +54,8 @@ namespace NFWL
 
         void EnsureLighting()
         {
-            foreach (Light l in FindObjectsByType<Light>(FindObjectsSortMode.None))
-            {
-                if (l.type == LightType.Directional) return; // the scene already has a sun
-            }
+            Light existing = FindAnyObjectByType<Light>();
+            if (existing != null && existing.type == LightType.Directional) return; // the scene already has a sun
             GameObject sun = new GameObject("Sun");
             Light light = sun.AddComponent<Light>();
             light.type = LightType.Directional;
