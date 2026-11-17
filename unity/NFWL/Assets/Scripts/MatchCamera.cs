@@ -9,7 +9,7 @@ namespace NFWL
     public class MatchCamera : MonoBehaviour
     {
         public Transform target;
-        public float distance = 26f;
+        public float distance = 20f;
         public float pitchDeg = 45f;
         public float followSpeed = 6f;
         public float fieldOfView = 55f;

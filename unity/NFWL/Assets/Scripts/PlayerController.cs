@@ -153,29 +153,25 @@ namespace NFWL
 
         void ReadInput()
         {
-#if ENABLE_LEGACY_INPUT_MANAGER
             float x = 0f, y = 0f;
-            if (Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.RightArrow)) x += 1f;
-            if (Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.LeftArrow)) x -= 1f;
-            if (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow)) y += 1f;
-            if (Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow)) y -= 1f;
+            if (KeyInput.Get(KeyCode.D) || KeyInput.Get(KeyCode.RightArrow)) x += 1f;
+            if (KeyInput.Get(KeyCode.A) || KeyInput.Get(KeyCode.LeftArrow)) x -= 1f;
+            if (KeyInput.Get(KeyCode.W) || KeyInput.Get(KeyCode.UpArrow)) y += 1f;
+            if (KeyInput.Get(KeyCode.S) || KeyInput.Get(KeyCode.DownArrow)) y -= 1f;
             moveInput = Vector2.ClampMagnitude(new Vector2(x, y), 1f);
 
-            Sprinting = Input.GetKey(sprintKey) || Input.GetKey(KeyCode.RightShift);
+            Sprinting = KeyInput.Get(sprintKey) || KeyInput.Get(KeyCode.RightShift);
 
             HandleKickKey(shortPassKey, KickType.ShortPass);
             HandleKickKey(longPassKey, KickType.LongPass);
             HandleKickKey(shootKey, KickType.Shoot);
-#endif
         }
 
-#if ENABLE_LEGACY_INPUT_MANAGER
         void HandleKickKey(KeyCode key, KickType type)
         {
-            if (Input.GetKeyDown(key)) BeginCharge(type);
-            if (Input.GetKeyUp(key)) ReleaseCharge(type);
+            if (KeyInput.Down(key)) BeginCharge(type);
+            if (KeyInput.Up(key)) ReleaseCharge(type);
         }
-#endif
 
         /// <summary>Directions are relative to the fixed side-on camera: W = +Z (up the screen), D = +X (right).</summary>
         Vector3 InputWorldDirection()

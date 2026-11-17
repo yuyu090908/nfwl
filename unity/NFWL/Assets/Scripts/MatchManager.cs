@@ -83,9 +83,7 @@ namespace NFWL
 
         void Update()
         {
-#if ENABLE_LEGACY_INPUT_MANAGER
-            if (Input.GetKeyDown(KeyCode.R)) ResetKickoff();
-#endif
+            if (KeyInput.Down(KeyCode.R)) ResetKickoff();
             if (resetPending)
             {
                 if (Time.time >= resetAt) ResetKickoff();
@@ -162,8 +160,19 @@ namespace NFWL
             GUI.color = old;
         }
 
+        void LateUpdate()
+        {
+            KeyInput.EndFrame();
+        }
+
+        void OnApplicationFocus(bool hasFocus)
+        {
+            if (!hasFocus) KeyInput.ReleaseAll();
+        }
+
         void OnGUI()
         {
+            KeyInput.HandleEvent(Event.current);
             InitStyles();
             float cx = Screen.width * 0.5f;
 
@@ -205,11 +214,10 @@ namespace NFWL
                 "Move: WASD / Arrows   Sprint: Shift   Pass: J   Shoot: K (hold = power)   Long pass: L   Reset: R",
                 smallStyle);
 
-#if !ENABLE_LEGACY_INPUT_MANAGER
-            GUI.Label(new Rect(20f, 100f, Screen.width - 40f, 60f),
-                "Keyboard input is off. Edit > Project Settings > Player > Active Input Handling = Both, then restart Unity.",
-                eventStyle.WithSize(18));
-#endif
+            string keyInfo = string.IsNullOrEmpty(KeyInput.LastKey)
+                ? "Click the game screen once, then use the keyboard."
+                : "Last key: " + KeyInput.LastKey;
+            GUI.Label(new Rect(20f, Screen.height - 22f, Screen.width - 40f, 22f), keyInfo, smallStyle);
         }
     }
 
