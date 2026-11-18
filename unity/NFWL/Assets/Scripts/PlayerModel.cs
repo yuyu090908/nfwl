@@ -1,20 +1,12 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace NFWL
 {
-    /// <summary>Kit colours for one team (or the goalkeeper of a team).</summary>
-    public struct Kit
-    {
-        public Color shirt, trim, shorts, socks, boots;
-
-        public Kit(Color shirt, Color trim, Color shorts, Color socks, Color boots)
-        {
-            this.shirt = shirt; this.trim = trim; this.shorts = shorts; this.socks = socks; this.boots = boots;
-        }
-    }
-
     /// <summary>
-    /// A stylised footballer built from primitive shapes, with procedural animation:
+    /// A Crystalia footballer (yu's character designs): elf ears, crystal shards on the shoulders,
+    /// forearms and shins, glowing eyes, spiky hair, and the NFWL kit with crystal pattern and number.
+    /// Built from primitive shapes and a procedural shard mesh, with procedural animation:
     /// run cycle scaled by speed, kick swing, goalkeeper dive and goal celebration.
     /// Lightweight on purpose (no downloaded models), so it runs well on an 8GB Mac.
     /// </summary>
@@ -34,7 +26,7 @@ namespace NFWL
         const float KickTime = 0.32f;
         const float DiveTime = 0.9f;
 
-        public static PlayerModel Build(PlayerController owner, Kit kit, Color skin, Color hair, int hairStyle, float heightScale)
+        public static PlayerModel Build(PlayerController owner, KitStyle kit, Element el, int number, int hairStyle, float heightScale)
         {
             Transform root = owner.transform;
             PlayerModel m = new GameObject("Model").AddComponent<PlayerModel>();
@@ -42,83 +34,137 @@ namespace NFWL
             m.transform.SetParent(root, false);
             m.transform.localScale = Vector3.one * heightScale;
 
-            Material shirt = Visuals.Mat(kit.shirt, 0.25f);
-            Material trim = Visuals.Mat(kit.trim, 0.25f);
-            Material shorts = Visuals.Mat(kit.shorts, 0.2f);
-            Material socks = Visuals.Mat(kit.socks, 0.2f);
-            Material boots = Visuals.Mat(kit.boots, 0.6f);
-            Material skinM = Visuals.Mat(skin, 0.3f);
-            Material hairM = Visuals.Mat(hair, 0.15f);
+            Material shirt = Visuals.Mat(kit.body, 0.3f);
+            Material trim = Visuals.Mat(kit.trim, 0.5f);
+            Material front = Visuals.Mat(Color.white, 0.3f, CrystalArt.KitPanel(kit, el.crystal, number, 0));
+            Material back = Visuals.Mat(Color.white, 0.3f, CrystalArt.KitPanel(kit, el.crystal, number, 1));
+            Material shortsPanel = Visuals.Mat(Color.white, 0.3f, CrystalArt.KitPanel(kit, el.crystal, number, 2));
+            Material shorts = Visuals.Mat(kit.body, 0.25f);
+            Material socks = Visuals.Mat(Color.Lerp(kit.body, el.crystal, 0.12f), 0.25f, CrystalArt.Facets, new Vector2(1f, 2f));
+            Material boots = CrystalArt.Metal(kit.boots);
+            Material skin = Visuals.Mat(el.skin, 0.45f);
+            Material limbSkin = el.crystalSkin ? CrystalArt.CrystalSkin(el.skin, el.crystal) : Visuals.Mat(el.skin, 0.45f, CrystalArt.Facets, new Vector2(1f, 1f));
+            Material hair = CrystalArt.Glow(el.hair, el.crystal, 0.15f, 0.7f, null);
+            Material crystal = CrystalArt.Crystal(el.crystal);
+            Material eyes = CrystalArt.Glow(el.eye, el.eye, 1.6f, 0.9f, null);
 
             // body: everything that leans / dives.
             m.body = Visuals.Pivot(m.transform, Vector3.zero, "Body");
             m.hips = Visuals.Pivot(m.body, new Vector3(0f, 0.95f, 0f), "Hips");
-            Visuals.Part(PrimitiveType.Cube, m.hips, new Vector3(0f, 0.02f, 0f), new Vector3(0.36f, 0.22f, 0.22f), shorts, "Shorts");
+            Visuals.Part(PrimitiveType.Cube, m.hips, new Vector3(0f, 0.02f, 0f), new Vector3(0.37f, 0.22f, 0.23f), shorts, "Shorts");
+            Visuals.Part(PrimitiveType.Quad, m.hips, new Vector3(0.1f, -0.02f, 0.117f), new Vector3(0.12f, 0.12f, 1f), shortsPanel, "ShortsNumber", Quaternion.Euler(0f, 180f, 0f));
 
             m.torso = Visuals.Pivot(m.hips, new Vector3(0f, 0.1f, 0f), "Torso");
-            Visuals.Part(PrimitiveType.Cube, m.torso, new Vector3(0f, 0.27f, 0f), new Vector3(0.42f, 0.52f, 0.24f), shirt, "Shirt");
-            Visuals.Part(PrimitiveType.Cube, m.torso, new Vector3(0f, 0.27f, 0f), new Vector3(0.43f, 0.06f, 0.25f), trim, "Band");
-            Visuals.Part(PrimitiveType.Cube, m.torso, new Vector3(0f, 0.54f, 0f), new Vector3(0.2f, 0.03f, 0.2f), trim, "Collar");
-            Visuals.Part(PrimitiveType.Cylinder, m.torso, new Vector3(0f, 0.58f, 0f), new Vector3(0.1f, 0.05f, 0.1f), skinM, "Neck");
+            Visuals.Part(PrimitiveType.Cube, m.torso, new Vector3(0f, 0.27f, 0f), new Vector3(0.44f, 0.54f, 0.25f), shirt, "Shirt");
+            Visuals.Part(PrimitiveType.Quad, m.torso, new Vector3(0f, 0.27f, 0.127f), new Vector3(0.44f, 0.54f, 1f), front, "ShirtFront", Quaternion.Euler(0f, 180f, 0f));
+            Visuals.Part(PrimitiveType.Quad, m.torso, new Vector3(0f, 0.27f, -0.127f), new Vector3(0.44f, 0.54f, 1f), back, "ShirtBack");
+            Visuals.Part(PrimitiveType.Cube, m.torso, new Vector3(0f, 0.545f, 0f), new Vector3(0.24f, 0.03f, 0.2f), trim, "Collar");
+            Visuals.Part(PrimitiveType.Cylinder, m.torso, new Vector3(0f, 0.59f, 0f), new Vector3(0.1f, 0.05f, 0.1f), skin, "Neck");
+            // Shoulder crystals (Sapphire / Emerald / Gold designs).
+            AddShardCluster(m.torso, new Vector3(-0.24f, 0.52f, 0f), -1f, crystal, 3, 0.26f);
+            AddShardCluster(m.torso, new Vector3(0.24f, 0.52f, 0f), 1f, crystal, 3, 0.26f);
 
-            m.head = Visuals.Pivot(m.torso, new Vector3(0f, 0.72f, 0f), "Head");
-            Visuals.Part(PrimitiveType.Sphere, m.head, Vector3.zero, new Vector3(0.22f, 0.25f, 0.23f), skinM, "Face");
-            // Hair styles: 0 short, 1 buzz, 2 tall top, 3 long.
-            switch (hairStyle)
-            {
-                case 1:
-                    Visuals.Part(PrimitiveType.Sphere, m.head, new Vector3(0f, 0.035f, -0.01f), new Vector3(0.225f, 0.2f, 0.23f), hairM, "Hair");
-                    break;
-                case 2:
-                    Visuals.Part(PrimitiveType.Sphere, m.head, new Vector3(0f, 0.07f, -0.01f), new Vector3(0.23f, 0.2f, 0.235f), hairM, "Hair");
-                    Visuals.Part(PrimitiveType.Cube, m.head, new Vector3(0f, 0.13f, 0.01f), new Vector3(0.1f, 0.08f, 0.18f), hairM, "Top");
-                    break;
-                case 3:
-                    Visuals.Part(PrimitiveType.Sphere, m.head, new Vector3(0f, 0.05f, -0.03f), new Vector3(0.24f, 0.23f, 0.25f), hairM, "Hair");
-                    Visuals.Part(PrimitiveType.Cube, m.head, new Vector3(0f, -0.06f, -0.09f), new Vector3(0.22f, 0.2f, 0.07f), hairM, "Back");
-                    break;
-                default:
-                    Visuals.Part(PrimitiveType.Sphere, m.head, new Vector3(0f, 0.06f, -0.02f), new Vector3(0.235f, 0.18f, 0.24f), hairM, "Hair");
-                    break;
-            }
-            // Eyes so you can see where he looks.
-            Material eye = Visuals.Mat(new Color(0.05f, 0.05f, 0.08f), 0.5f);
-            Visuals.Part(PrimitiveType.Sphere, m.head, new Vector3(0.045f, 0.01f, 0.105f), Vector3.one * 0.03f, eye, "EyeL");
-            Visuals.Part(PrimitiveType.Sphere, m.head, new Vector3(-0.045f, 0.01f, 0.105f), Vector3.one * 0.03f, eye, "EyeR");
+            m.head = Visuals.Pivot(m.torso, new Vector3(0f, 0.73f, 0f), "Head");
+            Visuals.Part(PrimitiveType.Sphere, m.head, Vector3.zero, new Vector3(0.2f, 0.25f, 0.22f), skin, "Face");
+            // Elf ears.
+            Shard(m.head, new Vector3(0.1f, 0.01f, -0.01f), Quaternion.Euler(0f, 0f, -70f), new Vector3(0.18f, 0.13f, 0.1f), skin, "EarR", true);
+            Shard(m.head, new Vector3(-0.1f, 0.01f, -0.01f), Quaternion.Euler(0f, 0f, 70f), new Vector3(0.18f, 0.13f, 0.1f), skin, "EarL", true);
+            // Glowing eyes.
+            Visuals.Part(PrimitiveType.Sphere, m.head, new Vector3(0.045f, 0.015f, 0.098f), new Vector3(0.04f, 0.028f, 0.02f), eyes, "EyeL");
+            Visuals.Part(PrimitiveType.Sphere, m.head, new Vector3(-0.045f, 0.015f, 0.098f), new Vector3(0.04f, 0.028f, 0.02f), eyes, "EyeR");
+            BuildHair(m.head, hair, crystal, hairStyle);
 
-            // Arms: pivot at the shoulder, sleeve + forearm.
-            m.armL = BuildArm(m.torso, -1f, shirt, skinM, out m.elbowL);
-            m.armR = BuildArm(m.torso, 1f, shirt, skinM, out m.elbowR);
+            m.armL = BuildArm(m.torso, -1f, shirt, trim, limbSkin, crystal, out m.elbowL);
+            m.armR = BuildArm(m.torso, 1f, shirt, trim, limbSkin, crystal, out m.elbowR);
 
-            // Legs: pivot at the hip, thigh (shorts/skin) + shin (sock) + boot.
-            m.legL = BuildLeg(m.hips, -1f, shorts, skinM, socks, boots, out m.kneeL);
-            m.legR = BuildLeg(m.hips, 1f, shorts, skinM, socks, boots, out m.kneeR);
+            m.legL = BuildLeg(m.hips, -1f, shorts, limbSkin, socks, trim, boots, crystal, out m.kneeL);
+            m.legR = BuildLeg(m.hips, 1f, shorts, limbSkin, socks, trim, boots, crystal, out m.kneeR);
 
-            // Soft shadow blob for readability from the high camera.
-            GameObject blob = Visuals.Part(PrimitiveType.Cylinder, m.transform, new Vector3(0f, 0.012f, 0f), new Vector3(0.6f, 0.002f, 0.6f),
-                Visuals.Mat(new Color(0.1f, 0.3f, 0.1f), 0f), "Shadow");
-            blob.GetComponent<Renderer>().shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            // Soft glow on the grass in the element colour (also helps to see players from the high camera).
+            GameObject blob = Visuals.Part(PrimitiveType.Cylinder, m.transform, new Vector3(0f, 0.012f, 0f), new Vector3(0.65f, 0.002f, 0.65f),
+                Visuals.Mat(Color.Lerp(new Color(0.08f, 0.25f, 0.08f), el.crystal, 0.25f), 0f), "Shadow");
+            blob.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
             return m;
         }
 
-        static Transform BuildArm(Transform torso, float side, Material sleeve, Material skin, out Transform elbow)
+        /// <summary>One crystal shard. Pivot at its base, pointing along local +Y.</summary>
+        static GameObject Shard(Transform parent, Vector3 pos, Quaternion rot, Vector3 scale, Material mat, string name, bool castShadow = false)
         {
-            Transform shoulder = Visuals.Pivot(torso, new Vector3(side * 0.27f, 0.48f, 0f), side < 0 ? "ArmL" : "ArmR");
-            Visuals.Part(PrimitiveType.Sphere, shoulder, Vector3.zero, Vector3.one * 0.14f, sleeve, "Shoulder");
-            Visuals.Part(PrimitiveType.Capsule, shoulder, new Vector3(0f, -0.13f, 0f), new Vector3(0.1f, 0.13f, 0.1f), sleeve, "Upper");
-            elbow = Visuals.Pivot(shoulder, new Vector3(0f, -0.26f, 0f), "Elbow");
+            GameObject go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = pos;
+            go.transform.localRotation = rot;
+            go.transform.localScale = scale;
+            go.AddComponent<MeshFilter>().sharedMesh = CrystalArt.Shard;
+            MeshRenderer r = go.AddComponent<MeshRenderer>();
+            r.sharedMaterial = mat;
+            r.shadowCastingMode = castShadow ? ShadowCastingMode.On : ShadowCastingMode.Off;
+            return go;
+        }
+
+        /// <summary>A fan of shards growing outward (side = -1 left, +1 right).</summary>
+        static void AddShardCluster(Transform parent, Vector3 at, float side, Material mat, int count, float size)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                float t = count == 1 ? 0f : i / (count - 1f) - 0.5f;
+                Quaternion rot = Quaternion.Euler(t * 40f, 0f, -side * (25f + i * 12f));
+                float s = size * (1f - Mathf.Abs(t) * 0.5f);
+                Shard(parent, at + new Vector3(0f, 0f, t * 0.12f), rot, new Vector3(s * 0.6f, s, s * 0.6f), mat, "Crystal");
+            }
+        }
+
+        static void BuildHair(Transform head, Material hair, Material crystal, int style)
+        {
+            Visuals.Part(PrimitiveType.Sphere, head, new Vector3(0f, 0.06f, -0.015f), new Vector3(0.215f, 0.17f, 0.235f), hair, "Hair");
+            // Spiky locks swept back and up (all designs have tousled, spiky hair).
+            int spikes = 7 + style;
+            for (int i = 0; i < spikes; i++)
+            {
+                float a = (i / (float)spikes) * 300f - 150f;
+                Quaternion rot = Quaternion.Euler(-35f - (i % 3) * 15f, a * 0.6f, (i % 2 == 0 ? 1f : -1f) * (10f + i * 4f));
+                Vector3 pos = new Vector3(Mathf.Sin(a * Mathf.Deg2Rad) * 0.07f, 0.1f, Mathf.Cos(a * Mathf.Deg2Rad) * 0.05f - 0.02f);
+                Shard(head, pos, rot, new Vector3(0.22f, 0.2f + (i % 3) * 0.04f, 0.22f), hair, "Lock", true);
+            }
+            // A small crystal in the hair (Ice / Sapphire / Gold designs).
+            Shard(head, new Vector3(0.07f, 0.12f, 0.03f), Quaternion.Euler(-20f, 0f, -35f), new Vector3(0.12f, 0.14f, 0.12f), crystal, "HairCrystal");
+        }
+
+        static Transform BuildArm(Transform torso, float side, Material sleeve, Material trim, Material skin, Material crystal, out Transform elbow)
+        {
+            Transform shoulder = Visuals.Pivot(torso, new Vector3(side * 0.28f, 0.48f, 0f), side < 0 ? "ArmL" : "ArmR");
+            Visuals.Part(PrimitiveType.Sphere, shoulder, Vector3.zero, Vector3.one * 0.15f, sleeve, "Shoulder");
+            Visuals.Part(PrimitiveType.Capsule, shoulder, new Vector3(0f, -0.08f, 0f), new Vector3(0.13f, 0.09f, 0.13f), sleeve, "Sleeve");
+            Visuals.Part(PrimitiveType.Cylinder, shoulder, new Vector3(0f, -0.16f, 0f), new Vector3(0.135f, 0.015f, 0.135f), trim, "Cuff");
+            Visuals.Part(PrimitiveType.Capsule, shoulder, new Vector3(0f, -0.2f, 0f), new Vector3(0.09f, 0.08f, 0.09f), skin, "Upper");
+            elbow = Visuals.Pivot(shoulder, new Vector3(0f, -0.27f, 0f), "Elbow");
             Visuals.Part(PrimitiveType.Capsule, elbow, new Vector3(0f, -0.13f, 0f), new Vector3(0.08f, 0.13f, 0.08f), skin, "Fore");
+            Visuals.Part(PrimitiveType.Sphere, elbow, new Vector3(0f, -0.29f, 0f), new Vector3(0.07f, 0.09f, 0.05f), skin, "Hand");
+            // Crystal blades along the outside of the forearm.
+            for (int i = 0; i < 3; i++)
+            {
+                Shard(elbow, new Vector3(side * 0.04f, -0.06f - i * 0.07f, -0.01f),
+                    Quaternion.Euler(0f, 0f, side * (-150f + i * 12f)), new Vector3(0.09f, 0.16f + i * 0.03f, 0.09f), crystal, "ArmCrystal");
+            }
             return shoulder;
         }
 
-        static Transform BuildLeg(Transform hips, float side, Material shorts, Material skin, Material sock, Material boot, out Transform knee)
+        static Transform BuildLeg(Transform hips, float side, Material shorts, Material skin, Material sock, Material trim, Material boot, Material crystal, out Transform knee)
         {
             Transform hip = Visuals.Pivot(hips, new Vector3(side * 0.1f, 0f, 0f), side < 0 ? "LegL" : "LegR");
-            Visuals.Part(PrimitiveType.Capsule, hip, new Vector3(0f, -0.1f, 0f), new Vector3(0.16f, 0.12f, 0.16f), shorts, "ShortsLeg");
-            Visuals.Part(PrimitiveType.Capsule, hip, new Vector3(0f, -0.28f, 0f), new Vector3(0.13f, 0.14f, 0.13f), skin, "Thigh");
+            Visuals.Part(PrimitiveType.Capsule, hip, new Vector3(0f, -0.1f, 0f), new Vector3(0.17f, 0.12f, 0.17f), shorts, "ShortsLeg");
+            Visuals.Part(PrimitiveType.Capsule, hip, new Vector3(0f, -0.29f, 0f), new Vector3(0.13f, 0.14f, 0.13f), skin, "Thigh");
             knee = Visuals.Pivot(hip, new Vector3(0f, -0.44f, 0f), "Knee");
             Visuals.Part(PrimitiveType.Capsule, knee, new Vector3(0f, -0.22f, 0f), new Vector3(0.12f, 0.22f, 0.12f), sock, "Shin");
-            Visuals.Part(PrimitiveType.Cube, knee, new Vector3(0f, -0.46f, 0.05f), new Vector3(0.11f, 0.07f, 0.26f), boot, "Boot");
+            Visuals.Part(PrimitiveType.Cylinder, knee, new Vector3(0f, -0.04f, 0f), new Vector3(0.125f, 0.015f, 0.125f), trim, "SockBand");
+            Visuals.Part(PrimitiveType.Cube, knee, new Vector3(0f, -0.46f, 0.05f), new Vector3(0.11f, 0.07f, 0.27f), boot, "Boot");
+            // Crystal greaves on the shin, pointing up past the knee (all designs).
+            for (int i = 0; i < 3; i++)
+            {
+                float a = (i - 1) * 35f;
+                Shard(knee, new Vector3(Mathf.Sin(a * Mathf.Deg2Rad) * 0.05f, -0.3f + i % 2 * 0.04f, 0.04f),
+                    Quaternion.Euler(12f, a, side * (i - 1) * 8f), new Vector3(0.12f, 0.32f - (i % 2) * 0.06f, 0.12f), crystal, "LegCrystal");
+            }
             return hip;
         }
 

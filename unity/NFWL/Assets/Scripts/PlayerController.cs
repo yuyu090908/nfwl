@@ -18,6 +18,7 @@ namespace NFWL
         public int number = 10;
         public string displayName = "PLAYER";
         public Rarity rarity = Rarity.Common;
+        public Element element;
 
         /// <summary>Formation spot, written for a team that attacks +X (mirrored for AWAY).</summary>
         public Vector2 formationSpot;
@@ -81,7 +82,7 @@ namespace NFWL
         const float BodyHeight = 1.8f;
 
         public static PlayerController Create(int team, Role role, int number, string name, Rarity rarity,
-            PlayerAttributes attrs, Kit kit, Color skin, Color hair, int hairStyle, float heightScale)
+            PlayerAttributes attrs, KitStyle kit, Element element, int hairStyle, float heightScale)
         {
             GameObject go = new GameObject($"{(team == 0 ? "HOME" : "AWAY")}_{number}_{name}");
             CharacterController cc = go.AddComponent<CharacterController>();
@@ -103,7 +104,8 @@ namespace NFWL
                 pc.maxTrapRelativeSpeed = 24f;
             }
             pc.ApplyAttributes();
-            pc.Model = PlayerModel.Build(pc, kit, skin, hair, hairStyle, heightScale);
+            pc.element = element;
+            pc.Model = PlayerModel.Build(pc, kit, element, number, hairStyle, heightScale);
             return pc;
         }
 

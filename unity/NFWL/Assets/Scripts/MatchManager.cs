@@ -19,18 +19,18 @@ namespace NFWL
         public float outResetDelay = 1.5f;
 
         [Header("Teams")]
-        public string homeName = "NFWL BLUE";
-        public string homeShort = "NFW";
-        public string awayName = "CRIMSON FC";
-        public string awayShort = "CRI";
+        public string homeName = "NFWL CRYSTALIA";
+        public string homeShort = "CRY";
+        public string awayName = "FROST UNITED";
+        public string awayShort = "FRO";
         [Range(40, 99)] public int awayLevel = 66;
 
         public int HomeScore { get; private set; }
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime;
 
-        static readonly Color HomeColor = new Color(0.12f, 0.42f, 0.98f);
-        static readonly Color AwayColor = new Color(0.86f, 0.12f, 0.18f);
+        static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
+        static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
         static readonly Color Gold = new Color(1f, 0.78f, 0.2f);
         static readonly Color Cyan = new Color(0.1f, 0.85f, 1f);
         static readonly Color Navy = new Color(0.03f, 0.06f, 0.15f, 0.88f);
@@ -131,13 +131,9 @@ namespace NFWL
                 new Slot(Role.FW, 9, "P. ROSSI", new Vector2(2f, 0f)),
             };
 
-            Kit homeKit = new Kit(HomeColor, Cyan, new Color(0.95f, 0.95f, 0.98f), HomeColor, new Color(0.1f, 0.1f, 0.12f));
-            Kit homeGk = new Kit(new Color(0.15f, 0.85f, 0.35f), new Color(0.05f, 0.25f, 0.1f), new Color(0.1f, 0.1f, 0.12f), new Color(0.15f, 0.85f, 0.35f), Color.white);
-            Kit awayKit = new Kit(AwayColor, Color.white, new Color(0.12f, 0.12f, 0.15f), AwayColor, Color.white);
-            Kit awayGk = new Kit(new Color(1f, 0.55f, 0.1f), new Color(0.2f, 0.1f, 0f), new Color(0.1f, 0.1f, 0.12f), new Color(1f, 0.55f, 0.1f), new Color(0.1f, 0.1f, 0.12f));
-
-            Color[] skins = { new Color(0.98f, 0.82f, 0.68f), new Color(0.86f, 0.66f, 0.5f), new Color(0.62f, 0.44f, 0.3f), new Color(0.42f, 0.28f, 0.18f) };
-            Color[] hairs = { new Color(0.08f, 0.06f, 0.05f), new Color(0.3f, 0.18f, 0.08f), new Color(0.85f, 0.7f, 0.4f), new Color(0.55f, 0.2f, 0.08f) };
+            // Crystalia players from yu's designs: each slot has its own crystal element.
+            Element[] homeElements = { Element.Amethyst, Element.Sapphire, Element.Emerald, Element.Gold, Element.Violet };
+            Element[] awayElements = { Element.Emerald, Element.Ice, Element.Ice, Element.Sapphire, Element.Ice };
             Rarity[] rarities = { Rarity.Rare, Rarity.Common, Rarity.Common, Rarity.Epic, Rarity.Mythic };
 
             for (int t = 0; t < 2; t++)
@@ -149,11 +145,12 @@ namespace NFWL
                     int level = t == 0 ? 70 + (int)rarities[i] * 4 : awayLevel;
                     PlayerAttributes attrs = PlayerAttributes.Random(level, rnd);
                     if (s.role == Role.GK) attrs.Goalkeeping = Mathf.Clamp(level + 8, 40, 99);
-                    Kit kit = s.role == Role.GK ? (t == 0 ? homeGk : awayGk) : (t == 0 ? homeKit : awayKit);
+                    // Kits from the design sheet: HOME black, AWAY white, keepers THIRD purple / teal.
+                    KitStyle kit = s.role == Role.GK ? (t == 0 ? KitStyle.Third : KitStyle.AwayKeeper) : (t == 0 ? KitStyle.Home : KitStyle.Away);
                     PlayerController p = PlayerController.Create(t, s.role, s.number, s.name,
                         t == 0 ? rarities[i] : (Rarity)rnd.Next(0, 3), attrs, kit,
-                        skins[rnd.Next(skins.Length)], hairs[rnd.Next(hairs.Length)], rnd.Next(0, 4),
-                        0.95f + (float)rnd.NextDouble() * 0.1f);
+                        t == 0 ? homeElements[i] : awayElements[i], rnd.Next(0, 4),
+                        0.97f + (float)rnd.NextDouble() * 0.08f);
                     p.formationSpot = s.spot;
                     (t == 0 ? home : away).Add(p);
                 }
@@ -287,6 +284,12 @@ namespace NFWL
                 if (fullTime) RestartMatch(); else ResetKickoff();
             }
             if (KeyInput.Down(KeyCode.Q) && !fullTime) SwitchToNearest();
+            if (KeyInput.Down(KeyCode.Z) && Camera.main != null)
+            {
+                // Z: zoom between close-up (see the characters) and wide (see the whole play).
+                MatchCamera mc = Camera.main.GetComponent<MatchCamera>();
+                if (mc != null) mc.distance = mc.distance < 14f ? 16f : mc.distance < 20f ? 24f : 11f;
+            }
 
             UpdateCameraAnchor();
             UpdateMarker();
@@ -511,7 +514,7 @@ namespace NFWL
             DrawPowerGauge();
 
             Label(new Rect(16f, Screen.height - 26f, Screen.width - 32f, 22f),
-                "WASD: move   Shift: sprint   J: pass   L: long pass   K: shoot (hold = power)   Q: switch player   R: reset",
+                "WASD: move   Shift: sprint   J: pass   L: long pass   K: shoot (hold = power)   Q: switch player   Z: zoom   R: reset",
                 smallStyle, new Color(1f, 1f, 1f, 0.85f));
             if (string.IsNullOrEmpty(KeyInput.LastKey))
             {
@@ -606,7 +609,7 @@ namespace NFWL
             Label(new Rect(x + 12f, y + 6f, 60f, 44f), ovr.ToString(), bigStyle.WithSize(34), rc);
             Label(new Rect(x + 12f, y + 44f, 60f, 18f), human.role.ToString(), tagStyle, Color.white, false);
             Label(new Rect(x + 78f, y + 10f, w - 84f, 24f), human.displayName, cardTitle, Color.white);
-            Label(new Rect(x + 78f, y + 34f, w - 84f, 18f), $"#{human.number}  {homeName}", smallStyle, new Color(1f, 1f, 1f, 0.7f), false);
+            Label(new Rect(x + 78f, y + 34f, w - 84f, 18f), $"#{human.number}  CRYSTALIA / {human.element.name}", smallStyle, new Color(1f, 1f, 1f, 0.7f), false);
             Box(new Rect(x + 78f, y + 54f, 86f, 16f), rc);
             Label(new Rect(x + 78f, y + 54f, 86f, 16f), human.rarity.ToString().ToUpper(), tagStyle, new Color(0.05f, 0.07f, 0.15f), false);
 
