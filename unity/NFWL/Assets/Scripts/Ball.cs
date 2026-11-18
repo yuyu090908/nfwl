@@ -28,7 +28,11 @@ namespace NFWL
             go.name = "Ball";
             // Unity's sphere is 1m wide with a 0.5m collider, so scaling keeps them in step.
             go.transform.localScale = Vector3.one * PitchDims.BallRadius * 2f;
-            go.GetComponent<Renderer>().sharedMaterial = Visuals.Mat(Color.white, 0.55f, Visuals.Ball);
+            // The real ball is only 22cm wide, tiny from the broadcast camera, so the visible ball
+            // is drawn 1.6x bigger (physics keeps the real size).
+            go.GetComponent<Renderer>().enabled = false;
+            Visuals.Part(PrimitiveType.Sphere, go.transform, Vector3.zero, Vector3.one * 1.6f,
+                Visuals.Mat(Color.white, 0.55f, Visuals.Ball), "BallVisual");
             go.AddComponent<Rigidbody>();
             return go.AddComponent<Ball>();
         }

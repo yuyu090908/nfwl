@@ -41,6 +41,7 @@ namespace NFWL
         PlayerController human;
         Transform marker;
         Transform cameraAnchor;
+        Transform ballMarker;
 
         bool resetPending;
         float resetAt;
@@ -82,6 +83,10 @@ namespace NFWL
             marker = Visuals.Part(PrimitiveType.Cylinder, null, Vector3.zero, new Vector3(1.1f, 0.003f, 1.1f),
                 Visuals.Mat(new Color(1f, 0.85f, 0.15f), 0.2f), "ControlMarker").transform;
             marker.GetComponent<Renderer>().shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+
+            ballMarker = Visuals.Part(PrimitiveType.Cylinder, null, Vector3.zero, new Vector3(0.7f, 0.002f, 0.7f),
+                Visuals.Mat(new Color(1f, 1f, 1f), 0.1f), "BallMarker").transform;
+            ballMarker.GetComponent<Renderer>().shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
 
             cameraAnchor = new GameObject("CameraAnchor").transform;
             EnsureLighting();
@@ -360,6 +365,14 @@ namespace NFWL
 
         void UpdateMarker()
         {
+            if (ballMarker != null)
+            {
+                // White ring on the grass under the ball, so you can see where it is even in the air.
+                Vector3 b = ball.transform.position;
+                ballMarker.position = new Vector3(b.x, 0.012f, b.z);
+                float k = 0.7f + Mathf.Clamp(b.y, 0f, 3f) * 0.15f;
+                ballMarker.localScale = new Vector3(k, 0.002f, k);
+            }
             if (marker == null || human == null) return;
             marker.position = human.transform.position + Vector3.up * 0.015f;
             float pulse = 1f + Mathf.Sin(Time.time * 6f) * 0.06f;
