@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace NFWL
@@ -38,6 +39,8 @@ namespace NFWL
         public KeyCode longPassKey = KeyCode.L;
 
         public bool IsHuman { get; set; }
+        /// <summary>Moved by the user's keys (false for the user's player in AutoPlay).</summary>
+        public bool UserControlled => IsHuman && !(Match != null && Match.AutoPlay);
         public bool HasBall { get; private set; }
         public bool Sprinting { get; private set; }
         public float Speed => loco.Speed;
@@ -69,7 +72,19 @@ namespace NFWL
         public float WeakFootFactor(float side)
         {
             bool preferred = (side < 0f) == (attributes.PreferredFoot == PreferredFoot.Left);
-            return preferred ? 1f : Mathf.Lerp(1.9f, 1f, (Mathf.Clamp(attributes.WeakFootRating, 1, 5) - 1) / 4f);
+            if (preferred) return 1f;
+            float f = Mathf.Lerp(1.9f, 1f, (Mathf.Clamp(attributes.WeakFootRating, 1, 5) - 1) / 4f);
+            return Skills.WeakFootMaster(this) ? 1f + (f - 1f) * 0.5f : f;
+        }
+
+        readonly List<SkillId> skills = new List<SkillId>();
+        /// <summary>Extra skills (PHASE 11), limited by rarity: Epic 1, Mythic 2, Legendary 3.</summary>
+        public IReadOnlyList<SkillId> SkillList => skills;
+        public bool HasSkill(SkillId id) => skills.Contains(id);
+        public void SetSkills(List<SkillId> wanted)
+        {
+            skills.Clear();
+            skills.AddRange(Skills.Clamp(rarity, wanted));
         }
 
         CharacterController controller;
@@ -187,14 +202,16 @@ namespace NFWL
                 moveInput = Vector2.zero;
                 Sprinting = false;
             }
-            else if (IsHuman)
+            else if (UserControlled)
             {
                 ReadInput();
             }
             else
             {
                 if (charging) charging = false;
+                long t0 = PerfStats.Begin();
                 ThinkAI();
+                PerfStats.End(PerfStats.Slot.AI, t0);
             }
             kick.Tick(Time.time);
             if (Time.deltaTime > 0f) Move(Time.deltaTime); // paused (replay): nothing moves
@@ -477,7 +494,7 @@ namespace NFWL
             if (Match == null) return null;
             PlayerController best = null;
             float bestScore = float.MaxValue;
-            foreach (PlayerController mate in Match.Team(teamIndex))
+            foreach (PlayerController mate in Match.TeamList(teamIndex))
             {
                 if (mate == this) continue;
                 Vector3 to = mate.transform.position - transform.position;
@@ -618,11 +635,15 @@ namespace NFWL
             if (Match != null) Match.ShowKickLabel(this, res.label);
             if (Match != null && strike.type == KickType.Shoot) Match.OnShot(this);
             // The intended receiver moves to meet the ball (AI players; the user steers his own).
-            if (res.receiver != null && !res.receiver.IsHuman && res.receiveTime > 0f)
+            if (res.receiver != null && !res.receiver.UserControlled && res.receiveTime > 0f)
                 res.receiver.CallRun(res.receivePoint, Time.time + res.receiveTime + 0.4f);
             if (HasBall) ReleaseBall(kickCooldown);
             else noControlUntil = Time.time + kickCooldown;
         }
+
+        /// <summary>Tests / tools: request a kick as if the key was pressed (aim = flat direction).</summary>
+        public void DebugKick(KickType type, float power, Vector3 aim, KickVariant variant = KickVariant.Normal)
+            => RequestKick(type, power, false, aim, variant);
 
         /// <summary>Through ball: the AI runner goes to target until the given time.</summary>
         public void CallRun(Vector3 target, float until)
@@ -752,7 +773,7 @@ namespace NFWL
 
             if (!HasBall) return;
 
-            if (role == Role.GK && !IsHuman)
+            if (role == Role.GK && !UserControlled)
             {
                 // Keeper holds the ball in his hands.
                 Vector3 hands = transform.position + transform.forward * 0.45f + Vector3.up * 1.1f;
@@ -791,7 +812,7 @@ namespace NFWL
 
         void ThinkAI()
         {
-            if (ball == null || Match == null) { moveInput = Vector2.zero; return; }
+            if (ball == null || Match == null || Match.AIPaused) { moveInput = Vector2.zero; Sprinting = false; return; }
             Vector3 ballP = ball.transform.position;
 
             if (role == Role.GK) { ThinkKeeper(ballP); return; }

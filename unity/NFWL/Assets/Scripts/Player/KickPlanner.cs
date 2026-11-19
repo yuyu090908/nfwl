@@ -327,6 +327,7 @@ namespace NFWL
             float m = 1f;
             if (p.Sprinting) m *= 1.25f;
             m *= p.WeakFootFactor(r.side);
+            m *= r.type == KickType.Shoot ? Skills.ShotError(p) : Skills.PassError(p);
             m *= 1f + (1f - p.Locomotion.Balance);
             if (p.Match != null)
             {

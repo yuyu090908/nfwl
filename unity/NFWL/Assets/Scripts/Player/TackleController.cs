@@ -115,6 +115,7 @@ namespace NFWL
             if (owner.Dribble.TouchPending) chance *= 0.8f;
             // Off-balance tackler is weaker.
             chance *= Mathf.Lerp(0.6f, 1f, p.Locomotion.Balance);
+            chance *= Skills.TackleFactor(p);
             chance = Mathf.Clamp(chance, 0.05f, 0.95f);
 
             if (Random.value < chance)

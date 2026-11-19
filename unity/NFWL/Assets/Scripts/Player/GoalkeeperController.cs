@@ -46,7 +46,7 @@ namespace NFWL
         public GoalkeeperController(PlayerController owner) { p = owner; }
 
         float GoalX => -p.AttackSign * PitchDims.HalfLength;
-        public float ReactionTime => Rules.AttrLerp(p.attributes.Goalkeeping, 0.32f, 0.16f);
+        public float ReactionTime => Rules.AttrLerp(p.attributes.Goalkeeping, 0.32f, 0.16f) - Skills.ReactionBonus(p);
         public float DiveSpeed => Rules.AttrLerp(p.attributes.Goalkeeping, 5f, 7f);
         public float MaxDive => Rules.AttrLerp(p.attributes.Goalkeeping, 1.9f, 2.7f);
 
@@ -100,7 +100,7 @@ namespace NFWL
             {
                 Vector3 toGoal = new Vector3(goalX, 0f, 0f) - B;
                 bool covered = false;
-                foreach (PlayerController d in p.Match.Team(p.teamIndex))
+                foreach (PlayerController d in p.Match.TeamList(p.teamIndex))
                 {
                     if (d == p) continue;
                     Vector3 rel = d.transform.position - B;

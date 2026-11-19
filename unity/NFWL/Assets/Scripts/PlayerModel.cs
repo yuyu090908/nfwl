@@ -592,6 +592,13 @@ namespace NFWL
         /// <summary>Animation runs after all movement this frame, so planted feet stay exactly in place.</summary>
         void LateUpdate()
         {
+            long t0 = PerfStats.Begin();
+            Animate();
+            PerfStats.End(PerfStats.Slot.Animation, t0);
+        }
+
+        void Animate()
+        {
             if (owner == null) return;
             float dt = Time.deltaTime;
             if (dt <= 0f) return;

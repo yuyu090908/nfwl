@@ -64,6 +64,7 @@ namespace NFWL
         {
             match = m;
             team = teamIndex;
+            nextTick = teamIndex * TickInterval * 0.5f; // the two teams think on different frames
             mates = own;
             opps = other;
         }
@@ -84,7 +85,7 @@ namespace NFWL
         {
             foreach (Slot s in slots.Values) { s.role = AIRole.None; s.mark = null; s.since = -10f; }
             Presser = Interceptor = null;
-            nextTick = 0f;
+            nextTick = Time.time + team * TickInterval * 0.5f;
         }
 
         // ------------------------------------------------------------------ main tick
@@ -192,7 +193,7 @@ namespace NFWL
             if (best == null) return;
             Interceptor = best;
             InterceptPoint = bestAt;
-            if (best.IsHuman) { free.Remove(best); return; }
+            if (best.UserControlled) { free.Remove(best); return; }
             Slot s = SlotOf(best);
             SetRole(s, AIRole.Intercept, now);
             s.target = bestAt;
@@ -228,7 +229,7 @@ namespace NFWL
                 if (best != null)
                 {
                     free.Remove(best);
-                    if (!best.IsHuman)
+                    if (!best.UserControlled)
                     {
                         Slot s = SlotOf(best);
                         SetRole(s, AIRole.Press, now);
@@ -240,7 +241,7 @@ namespace NFWL
                 }
             }
             // The user's own player is not driven by the AI.
-            for (int i = free.Count - 1; i >= 0; i--) if (free[i].IsHuman) free.RemoveAt(i);
+            for (int i = free.Count - 1; i >= 0; i--) if (free[i].UserControlled) free.RemoveAt(i);
 
             // 2) Cover: between the ball and our goal, on the shot line, behind the presser.
             float ballToGoal = Vector3.Distance(threat, OwnGoal);
@@ -264,7 +265,7 @@ namespace NFWL
                 if (o == carrier || o.role == Role.GK) continue;
                 toMark.Add(o);
             }
-            toMark.Sort((a, b) => Vector3.Distance(a.transform.position, OwnGoal).CompareTo(Vector3.Distance(b.transform.position, OwnGoal)));
+            SortByDistance(toMark, OwnGoal);
 
             // Keep existing pairs first (sticky marking), then give the rest to the nearest free defender.
             for (int i = free.Count - 1; i >= 0; i--)
@@ -312,6 +313,19 @@ namespace NFWL
             free.Clear();
         }
 
+        /// <summary>Insertion sort by distance to a point (tiny lists, no allocation).</summary>
+        static void SortByDistance(List<PlayerController> list, Vector3 to)
+        {
+            for (int i = 1; i < list.Count; i++)
+            {
+                PlayerController x = list[i];
+                float dx = (x.transform.position - to).sqrMagnitude;
+                int j = i - 1;
+                while (j >= 0 && (list[j].transform.position - to).sqrMagnitude > dx) { list[j + 1] = list[j]; j--; }
+                list[j + 1] = x;
+            }
+        }
+
         /// <summary>Goal-side of the opponent; the further he is from the ball, the more we sit in the lane to him.</summary>
         Vector3 MarkSpot(PlayerController o, Vector3 ballAt, bool carrierExists)
         {
@@ -344,7 +358,7 @@ namespace NFWL
         void AssignAttack(Ball ball, PlayerController carrier, float now)
         {
             Presser = null;
-            for (int i = free.Count - 1; i >= 0; i--) if (free[i].IsHuman) free.RemoveAt(i);
+            for (int i = free.Count - 1; i >= 0; i--) if (free[i].UserControlled) free.RemoveAt(i);
             if (free.Count == 0) return;
             Vector3 C = carrier != null ? carrier.transform.position : ball.Body.position;
             C.y = 0f;
@@ -504,7 +518,7 @@ namespace NFWL
                 for (int i = 0; i < mates.Count; i++)
                 {
                     PlayerController a = mates[i];
-                    if (a.IsHuman) continue;
+                    if (a.UserControlled) continue;
                     Slot sa = SlotOf(a);
                     if (!Spreadable(sa.role)) continue;
                     Vector3 push = Vector3.zero;
@@ -512,7 +526,7 @@ namespace NFWL
                     {
                         if (i == j) continue;
                         PlayerController b = mates[j];
-                        Vector3 other = b.IsHuman || !slots.ContainsKey(b) || SlotOf(b).role == AIRole.Carrier
+                        Vector3 other = b.UserControlled || !slots.ContainsKey(b) || SlotOf(b).role == AIRole.Carrier
                             ? b.transform.position : SlotOf(b).target;
                         if (b.role == Role.GK) continue;
                         Vector3 d = sa.target - other;

@@ -29,7 +29,7 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime || (replay != null && replay.Playing);
 
-        public const string Version = "NFWL Unity v0.6-dev  STEP 10";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 11";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -129,6 +129,21 @@ namespace NFWL
 
         /// <summary>True between a goal / out and the restart.</summary>
         public bool ResetPending => resetPending;
+        /// <summary>Optional player data (set before Start). Null = Resources/NFWLPlayers.json if any, else random.</summary>
+        public static IPlayerDataSource DataSource { get; set; }
+        public int Half => half;
+        public bool FullTime => fullTime;
+        public float Clock => clock;
+        public PlayerController Human => human;
+        public Ball MatchBall => ball;
+        /// <summary>F4 / tests: the user's player is also played by the AI (CPU vs CPU).</summary>
+        public bool AutoPlay { get; set; }
+        /// <summary>Tests: AI players stand still (physics, kicks, tackles and saves still run).</summary>
+        public bool AIPaused { get; set; }
+        /// <summary>Goal / save replays on or off (tests run without them).</summary>
+        public bool ReplaysEnabled { get; set; } = true;
+        public bool ShowAIDebug { get => showAIDebug; set => showAIDebug = value; }
+        public bool ShowPerf { get => showPerf; set => showPerf = value; }
         public bool ReplayPlaying => replay != null && replay.Playing;
 
         IEnumerable<PlayerController> AllPlayers()
@@ -173,6 +188,10 @@ namespace NFWL
             Element[] awayElements = { Element.Emerald, Element.Ice, Element.Ice, Element.Sapphire, Element.Ice };
             Rarity[] rarities = { Rarity.Rare, Rarity.Common, Rarity.Common, Rarity.Epic, Rarity.Mythic };
 
+            // PHASE 11: players from data (Resources/NFWLPlayers.json, e.g. NFT metadata) when present.
+            // The random generator below still runs in the same order, so slots without data are unchanged.
+            IPlayerDataSource source = DataSource ?? JsonPlayerSource.FromResources();
+
             for (int t = 0; t < 2; t++)
             {
                 Slot[] slots = t == 0 ? homeSlots : awaySlots;
@@ -189,10 +208,20 @@ namespace NFWL
                     attrs.WeakFootRating = Mathf.Clamp(2 + footRnd.Next(0, 3) + (t == 0 && rarities[i] >= Rarity.Mythic ? 1 : 0), 1, 5);
                     // Kits from the design sheet: HOME black, AWAY white, keepers THIRD purple / teal.
                     KitStyle kit = s.role == Role.GK ? (t == 0 ? KitStyle.Third : KitStyle.AwayKeeper) : (t == 0 ? KitStyle.Home : KitStyle.Away);
-                    PlayerController p = PlayerController.Create(t, s.role, s.number, s.name,
-                        t == 0 ? rarities[i] : (Rarity)rnd.Next(0, 3), attrs, kit,
+                    Rarity rarity = t == 0 ? rarities[i] : (Rarity)rnd.Next(0, 3);
+                    string name = s.name;
+                    PlayerData data = null;
+                    if (source != null && source.TryGet(t, i, out data))
+                    {
+                        attrs = data.BuildAttributes(attrs);
+                        if (data.hasRarity) rarity = data.rarity;
+                        if (!string.IsNullOrEmpty(data.name)) name = data.name;
+                    }
+                    PlayerController p = PlayerController.Create(t, s.role, s.number, name,
+                        rarity, attrs, kit,
                         t == 0 ? homeElements[i] : awayElements[i], rnd.Next(0, 4),
                         0.97f + (float)rnd.NextDouble() * 0.08f);
+                    if (data != null) p.SetSkills(data.skills);
                     p.formationSpot = s.spot;
                     (t == 0 ? home : away).Add(p);
                 }
@@ -221,20 +250,20 @@ namespace NFWL
             PlayerController best = null;
             float bestD = float.MaxValue;
             Vector3 b = ball.transform.position;
-            foreach (PlayerController p in Team(teamIndex))
+            foreach (PlayerController p in TeamList(teamIndex))
             {
                 if (p.role == Role.GK) continue;
                 float d = (p.transform.position - b).sqrMagnitude;
                 if (d < bestD) { bestD = d; best = p; }
             }
-            return best != null && best.IsHuman ? null : best;
+            return best != null && best.UserControlled ? null : best;
         }
 
         public PlayerController NearestOpponent(PlayerController me, out float dist)
         {
             PlayerController best = null;
             float bestD = float.MaxValue;
-            foreach (PlayerController p in Team(1 - me.teamIndex))
+            foreach (PlayerController p in TeamList(1 - me.teamIndex))
             {
                 float d = Vector3.Distance(p.transform.position, me.transform.position);
                 if (d < bestD) { bestD = d; best = p; }
@@ -248,7 +277,7 @@ namespace NFWL
         {
             PlayerController best = null;
             float bestScore = float.MinValue;
-            foreach (PlayerController mate in Team(me.teamIndex))
+            foreach (PlayerController mate in TeamList(me.teamIndex))
             {
                 if (mate == me || mate.role == Role.GK) continue;
                 Vector3 to = mate.transform.position - me.transform.position;
@@ -321,6 +350,9 @@ namespace NFWL
 
         void Update()
         {
+            PerfStats.EndFrame();
+            if (KeyInput.Down(KeyCode.F2)) showPerf = !showPerf;
+            if (KeyInput.Down(KeyCode.F4)) AutoPlay = !AutoPlay;
             if (replay != null && replay.Playing)
             {
                 // Any action key skips the replay.
@@ -354,8 +386,10 @@ namespace NFWL
             if (sfx != null) sfx.SetDanger(Danger());
             if (teamAI[0] != null && !resetPending)
             {
+                long t0 = PerfStats.Begin();
                 teamAI[0].Tick(ball, Time.time);
                 teamAI[1].Tick(ball, Time.time);
+                PerfStats.End(PerfStats.Slot.AI, t0);
             }
 
             if (!resetPending)
@@ -403,7 +437,9 @@ namespace NFWL
         void FixedUpdate()
         {
             // Ball against bodies (legs, torso, head) - v0.6 PHASE 4.4.
+            long t0 = PerfStats.Begin();
             if (!fullTime) BallContacts.Step(ball, all, Time.fixedDeltaTime, Time.time);
+            PerfStats.End(PerfStats.Slot.Contacts, t0);
         }
 
         /// <summary>All ten players (read only use).</summary>
@@ -461,6 +497,7 @@ namespace NFWL
 
         void QueueReplay(string title, float at, float from, float to, float speed, float yaw, float pitch, float dist, PlayerController subject)
         {
+            if (!ReplaysEnabled) return;
             replayQueued = true;
             replayQueuedAt = at;
             replayTitle = title;
@@ -495,13 +532,13 @@ namespace NFWL
             float sz = scorer.transform.position.z >= 0f ? 1f : -1f;
             Vector3 corner = new Vector3(sx * (PitchDims.HalfLength - 3f), 0f, sz * (PitchDims.HalfWidth - 3f));
             float until = Time.time + goalResetDelay;
-            if (!scorer.IsHuman) scorer.CallRun(corner, until);
+            if (!scorer.UserControlled) scorer.CallRun(corner, until);
             int k = 0;
             foreach (PlayerController m in TeamList(scorer.teamIndex))
             {
-                if (m == scorer || m.IsHuman || m.role == Role.GK) continue;
+                if (m == scorer || m.UserControlled || m.role == Role.GK) continue;
                 Vector3 offset = new Vector3(-sx * (1.5f + k), 0f, (k % 2 == 0 ? -1f : 1f) * 1.2f);
-                m.CallRun((scorer.IsHuman ? scorer.transform.position : corner) + offset, until);
+                m.CallRun((scorer.UserControlled ? scorer.transform.position : corner) + offset, until);
                 k++;
             }
         }
@@ -528,7 +565,8 @@ namespace NFWL
             if (!hasFocus) KeyInput.ReleaseAll();
         }
 
-        void SwitchToNearest()
+        /// <summary>Q: control the team-mate nearest the ball.</summary>
+        public void SwitchToNearest()
         {
             PlayerController best = null;
             float bestD = float.MaxValue;
@@ -714,6 +752,8 @@ namespace NFWL
             DrawMotionDebug();
             if (showAIDebug) DrawAIDebug();
             if (ReplayPlaying) DrawReplayBadge(); else DrawEvent();
+            if (showPerf) DrawPerf();
+            if (AutoPlay) Label(new Rect(16f, Screen.height - 150f, 300f, 20f), "AUTO PLAY (CPU vs CPU)  F4: off", smallStyle, Gold, false);
             DrawPlayerCard();
             DrawPowerGauge();
             if (Time.time < kickLabelUntil)
@@ -877,6 +917,24 @@ namespace NFWL
             Label(new Rect(0f, Screen.height - bar + 8f, Screen.width, 24f), "Space / J / K / L : skip", smallStyle.WithAlign(TextAnchor.MiddleCenter), new Color(1f, 1f, 1f, 0.7f), false);
         }
 
+        bool showPerf;
+        string perfText = "";
+        float perfTextAt;
+
+        /// <summary>F2: measured performance (PHASE 12). Refreshed once a second.</summary>
+        void DrawPerf()
+        {
+            if (Time.unscaledTime >= perfTextAt)
+            {
+                perfTextAt = Time.unscaledTime + 1f;
+                perfText = string.Format("FPS {0:0}  (worst frame {1:0.0} ms)\nAI {2:0.00} ms  Anim/IK {3:0.00} ms  Contacts {4:0.00} ms\nGC/s {5}  Mono heap {6} MB  vSync {7}  target {8}",
+                    PerfStats.Fps, PerfStats.WorstFrameMs, PerfStats.Ms(PerfStats.Slot.AI), PerfStats.Ms(PerfStats.Slot.Animation),
+                    PerfStats.Ms(PerfStats.Slot.Contacts), PerfStats.GcPerSecond, PerfStats.MonoHeapMB, QualitySettings.vSyncCount, Application.targetFrameRate);
+            }
+            Box(new Rect(12f, 60f, 430f, 64f), new Color(0f, 0f, 0f, 0.6f));
+            Label(new Rect(20f, 64f, 420f, 60f), perfText, smallStyle, Color.white, false);
+        }
+
         bool showAIDebug;
         static readonly string[] roleShort = { "", "BALL", "GK", "INTERCEPT", "PRESS", "COVER", "MARK", "SUPPORT", "RUN", "WIDE", "REST" };
 
@@ -911,9 +969,23 @@ namespace NFWL
         }
     }
 
+    /// <summary>Derived GUI styles are cached (v0.6 PHASE 12: no new GUIStyle every OnGUI call).</summary>
     static class GUIStyleExt
     {
-        public static GUIStyle WithSize(this GUIStyle s, int size) => new GUIStyle(s) { fontSize = size };
-        public static GUIStyle WithAlign(this GUIStyle s, TextAnchor a) => new GUIStyle(s) { alignment = a };
+        static readonly Dictionary<(GUIStyle, int, int), GUIStyle> cache = new Dictionary<(GUIStyle, int, int), GUIStyle>();
+
+        public static GUIStyle WithSize(this GUIStyle s, int size) => Get(s, 0, size, () => new GUIStyle(s) { fontSize = size });
+        public static GUIStyle WithAlign(this GUIStyle s, TextAnchor a) => Get(s, 1, (int)a, () => new GUIStyle(s) { alignment = a });
+
+        static GUIStyle Get(GUIStyle s, int kind, int value, System.Func<GUIStyle> make)
+        {
+            var key = (s, kind, value);
+            if (!cache.TryGetValue(key, out GUIStyle g))
+            {
+                g = make();
+                cache[key] = g;
+            }
+            return g;
+        }
     }
 }

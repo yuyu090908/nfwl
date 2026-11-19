@@ -163,3 +163,139 @@ v0.5 Crystalia（ブランチ `claude/project-thread-kdvpa7`）から段階的�
   - 合成音は仮の音です。本物らしい音にするには録音素材が必要です。
 
 **見るところ**：ゴールを決めるとリプレイが始まること、Space で飛ばせること、終わったあと普通にキックオフになること。シュートを打った瞬間にカメラが少し低くなること。音が出ること（出なければ Mac の音量と M キーを確認）。
+
+## STEP 11：最適化・テスト・NFTデータ（実装済み・実機未確認）
+
+- 新規：`Core/PerfStats.cs`（性能計測）、`Core/PlayerData.cs`（NFTデータとスキル）、`Assets/Tests/EditMode/NFWLEditModeTests.cs`、`Assets/Tests/PlayMode/NFWLPlayModeTests.cs`、アセンブリ定義 `NFWL.asmdef` / `Editor/NFWL.Editor.asmdef` / テスト用2つ
+- 変更：`Packages/manifest.json`（Test Framework パッケージを追加）、`MatchManager.cs`、`PlayerController.cs`、`AI/TeamAI.cs`、`PlayerModel.cs`、`Player/KickPlanner.cs`、`Player/GoalkeeperController.cs`、`Player/TackleController.cs`、`README.md`、`GUIDE_Mac_ja.md`（キー表）
+- **最適化（GCを減らす）**：毎フレーム作っていた GUIStyle をキャッシュ。チームの列挙をリストの直接参照に変更（列挙子の生成なし）。AIのソートをラムダなしに。2チームのAI更新を別のフレームにずらした（AI計算の分散）。性能表示の文字列は1秒に1回だけ作る。
+- **F2：性能表示**：FPS（1秒平均と一番重いフレーム）、AI・アニメーション/IK・ボールと体の当たり判定にかかった時間（1フレームあたり ms）、GC回数/秒、Monoヒープ。**実測値はこの表示で確認してください**（こちらでは Unity を動かせないので未測定です）。
+- **F4：自動試合**：ユーザーの選手もAIが動かす（CPU対CPU）。AIの動きを眺めたり、長時間動かして確認するのに使えます。
+- **NFTデータ（PHASE 11）**：`Assets/Resources/NFWLPlayers.json` を置くと、その能力値・レアリティ・名前・スキルで選手を作ります。ファイルがなければ v0.5 と同じ乱数生成のまま（同じシード・同じ順番）。NFT のメタデータ形式（`"attributes":[{"trait_type":"Speed","value":91}, ...]`）も読めます。書いていない能力値は乱数生成の値のまま、能力値は 40〜99 に収めます。
+- **スキル**：Epic 1つ、Mythic 2つ、Legendary 3つまで（Common / Rare はなし）。今あるスキルは「精度が上がる・反応が早くなる」ものだけで、速さ・届く距離・ボールの物理は変えません。
+  - `PinpointPass`（パスの誤差×0.8）、`CoolFinisher`（シュートの誤差×0.8）、`CatReflexes`（GKの反応−0.03秒）、`IronWall`（タックル成功率×1.1、足が届くことは必須のまま）、`WeakFootMaster`（逆足の誤差の増え方が半分）
+
+`NFWLPlayers.json` の例（home / away それぞれ GK, DF, DF, MF, FW の順。途中まででもOK）：
+
+```json
+{
+  "home": [
+    { "name": "K. AOKI", "rarity": "Legendary", "attributes": { "Goalkeeping": 92, "Agility": 80 }, "skills": ["CatReflexes"] },
+    { "name": "R. SATO", "attributes": [ { "trait_type": "Tackling", "value": 88 }, { "trait_type": "Rarity", "value": "Epic" }, { "trait_type": "Skill", "value": "IronWall" } ] }
+  ],
+  "away": []
+}
+```
+
+### テストの実行方法
+
+1. Unity を開くと Test Framework パッケージが自動で入ります（`Packages/manifest.json` に追加済み。初回は少し時間がかかります）。
+2. メニュー **Window → General → Test Runner**。
+3. **EditMode** タブ → **Run All**（数秒）。**PlayMode** タブ → **Run All**（試合を何度も作るので数分。PCが重いときは1つずつ右クリック → Run）。
+4. 結果の数値（例：`[QA9] same-team outfield players within 3 m of the ball: avg ...`）は Console に出ます。
+
+| QA項目 | テスト | 種類 |
+| --- | --- | --- |
+| 1. 走行中に足が滑らない | `Running_FeetDoNotSlide` | PlayMode |
+| 2. 180度ターンで瞬間反転しない | `Turn180_NoInstantFlip` | EditMode |
+| 3. ドリブル中にボールが瞬間移動しない | `Dribble_BallNeverTeleports` | PlayMode |
+| 4. キックの足とボールの接触が同期 | `Kick_BallLeavesAtFootContact` | PlayMode |
+| 5. パスが指定方向へ飛ぶ | `GroundPass_FollowsAimLine`（EditMode）、`Pass_FliesTowardAim`（PlayMode） | 両方 |
+| 6. 衝突で異常な速度が出ない | `BallForces_NeverAddSpeed`（EditMode）、`BallCollisions_NoAbnormalSpeed`（PlayMode） | 両方 |
+| 7. タックルに適切な接触判定 | `Tackle_OutOfReachNeverWins` | PlayMode |
+| 8. 届かないボールをGKがセーブしない | `KeeperReach_HeightFallsWithStretch`（EditMode）、`Keeper_DoesNotSaveUnreachableShot`（PlayMode） | 両方 |
+| 9. AIが一か所に集まりすぎない | `AI_DoesNotClusterOnBall` | PlayMode |
+| 10. ゴール判定 | `GoalDetection_WholeBallOverTheLine` | EditMode |
+| 11. ハーフタイム・フルタイム | `FullMatch_RunsToFullTime` | PlayMode |
+| 12. R で正常に再開 | `Reset_RestartsFromKickoff` | PlayMode |
+| 13. 選手切替 | `Switch_GoesToNearestTeamMate` | PlayMode |
+| 14. 既存UIが壊れない | `UI_DrawsWithoutErrors` | PlayMode |
+| 15. 5対5の試合を最後まで実行 | `FullMatch_RunsToFullTime` | PlayMode |
+| NFTデータ・スキル・乱数生成の互換 | `NftMetadata_ParsesTraitsAndKeepsOthers`、`Skills_LimitedByRarity`、`RandomGeneration_UnchangedFromV05` | EditMode |
+
+**見るところ**：F2 で右上に性能表示が出ること。Test Runner で EditMode / PlayMode のテストが一覧に出て、実行できること。
+
+---
+
+# 最終報告（PHASE 15）
+
+**大前提**：こちらの作業環境では Unity を起動できません。すべてのコードは「Unity 2021 の参照DLLに Unity 6 の名前の違いを置き換えたコンパイル確認」と「一部の計算を取り出した単体シミュレーション」でしか確かめていません。**Unity 上でのコンパイル・動作・FPS・テスト結果はまだ一つも確認できていません。** 以下の「確認済み」はその範囲の意味です。
+
+## 1. 変更したファイル
+
+`MatchManager.cs`、`PlayerController.cs`、`PlayerModel.cs`、`Ball.cs`、`MatchCamera.cs`、`NFWLRules.cs`、`KeyInput.cs`、`Editor/NFWLProjectSetup.cs`、`Packages/manifest.json`、`README.md`、`GUIDE_Mac_ja.md`
+
+## 2. 新しく作ったクラス・ファイル
+
+| 場所 | クラス | 役割 |
+| --- | --- | --- |
+| `Core/NFWLTuning.cs` | NFWLTuning, LocomotionTuning, DribbleTuning, BallTuning, InputTuning | 調整値（ScriptableObject） |
+| `Core/PerfStats.cs` | PerfStats | 性能計測（F2） |
+| `Core/PlayerData.cs` | PlayerData, IPlayerDataSource, JsonPlayerSource, SkillId, Skills | NFTデータ読み込みとスキル |
+| `Player/PlayerLocomotion.cs` | PlayerLocomotion, LocoState, LocoInput | 慣性・旋回・傾き・バランス |
+| `Animation/GaitController.cs` | GaitController | 足の接地・固定・歩幅と周期 |
+| `Animation/LegIK.cs` | LegIK | 2ボーンIK |
+| `Player/DribbleController.cs` | DribbleController, TouchKind, FootStyle | タッチ式ドリブル |
+| `Player/KickController.cs` | KickController, KickPhase | 7段階のキックと接触同期 |
+| `Player/KickPlanner.cs` | KickPlanner, KickVariant, KickRequest, KickResult | パス・シュートの種類と軌道計算 |
+| `Ball/BallSolver.cs` | BallSolver | 球速・角度・カーブの逆算 |
+| `Ball/BallContacts.cs` | BallContacts | ボールと体（足・胴・頭）の当たり |
+| `Player/TackleController.cs` | TackleController | 足が届くかで決まるタックル |
+| `Player/PlayerContacts.cs` | PlayerContacts | 選手同士の接触・肩の競り合い |
+| `Player/GoalkeeperController.cs` | GoalkeeperController, SaveType | GKの位置取りと到達判定セーブ |
+| `AI/TeamAI.cs` | TeamAI, AIRole | チームの役割分担（Utility AI） |
+| `AI/CarrierBrain.cs` | CarrierBrain, AIDecision, AIAction | ボール保持者の判断（Utility AI） |
+| `Presentation/ReplaySystem.cs` | ReplaySystem | ゴール・セーブのリプレイ |
+| `Presentation/SoundFX.cs` | SoundFX | 合成音（笛・キック・歓声など） |
+| `Tests/EditMode`・`Tests/PlayMode` | NFWLEditModeTests, NFWLPlayModeTests | 自動テスト |
+
+## 3. 各システムの変更内容
+
+STEP 2〜11 の各節（このファイルの上）に書いたとおりです。要点：移動は速度と体の向きを分けた慣性モデル、足は接地固定＋2ボーンIK、ドリブルは足が触れた瞬間だけボールが動くタッチ式、キックは足がボールに届いた物理ステップでボールが出る、ボールは転がり抵抗・空気抵抗・回転・マグヌス力の独自モデル、タックルとGKのセーブは「届くかどうか」が先、AIは役割分担と行動の点数付け（ヒステリシスあり）、カメラは予測フォローとシュートカメラ、リプレイと合成音。
+
+## 4. 実際に動作確認できた機能
+
+- **コンパイル**：すべての実行時スクリプトとテストが、Unity 2021 参照DLL＋名前の置き換えでエラー0・警告0（Unity 6 本体でのコンパイルは未確認）。
+- **単体シミュレーション（Unityなし）で数値を確認したもの**：
+  - 180度ターン：体の向きの変化は最大 9.5°/フレーム、速度が反転するまで 0.40 秒、新しい方向で70%の速さまで 1.23 秒。
+  - 走行時の足：接地した足を届かせるのに必要な腰の下げ幅は最大 12.8 cm（実装の上限 16 cm 以内）。
+  - グラウンダーのパス：8m・18m とも狙った線からのずれ 0.03° 以下、到着距離の誤差 1% 以内、到着時の球速は計画どおり 6.0 m/s。
+  - 強い回転をかけたボールでも速度が増えない（10 / 25 / 34 m/s で最大速度は初速以下）。
+  - コントロールシュートのカーブ：狙った点に 0.07 m 以内で到着。
+- Unity 上での動作確認：**なし**（v0.5 までの起動とキー操作は 2026-11-18 に yu さんが確認済み）。
+
+## 5. テスト結果
+
+- EditMode 9件・PlayMode 12件を作成。**Unity の Test Runner ではまだ一度も実行していません。** EditMode のうち 180度ターン・パス方向・ボール速度の3件は、同じ計算を単体シミュレーションで実行して基準を満たすことを確認済み（上の数値）。
+- PlayMode の基準値（例：ボールの周り3m以内の同じチームの選手が平均1.6人未満）は設計上の目安で、実際に通るかは未確認です。落ちたテストがあれば、Console の `[QA番号]` の数値を教えてください。
+
+## 6. 未実装の機能
+
+- **PHASE 10（キャラクターの見た目）**：クリスタル装飾の揺れと発光、手と指のポーズ、関節の可動域の制限は**未実装**。膝・肘の曲がる向き（IKの向き指定）、足首、骨盤と肩の回転、走行時の揺れ、キック時の連動は実装済み。見た目と当たり判定は分離済み（装飾には当たり判定がなく、選手の当たりは CharacterController のカプセルのみ）。
+- **PHASE 8（アニメーション構造）**：Animator のステートマシンやブレンドツリーは使っていません。すべてコードによるアニメーション（層：移動・足の動作・軸足・キックの体・胸トラップ・タックル・セーブ・喜び）。本格的な人型モデルやモーションキャプチャに差し替えるための共通インターフェースは**未作成**です。
+- **AI**：オーバーラップ、ワンツー（Give and Go）を専用の動きとしては**未実装**（サポート・裏への走り・幅をとる動きはあり）。試合時間とスコアによる判断の変化も**未実装**。
+- **カメラ**：攻撃専用カメラ、カメラの衝突回避（スタジアムは開けているため現状不要と判断）は**未実装**。
+- **演出**：GKのセーブ後の専用リアクション、相手チームの落胆などは**未実装**（得点者の喜びとチームメイトが集まる動きはあり）。
+- **リスタート**：スローイン・コーナーキック・ゴールキックは v0.5 と同じく中央からの再開のまま。
+- **サウンド**：すべて合成の仮の音。本物らしい音には録音素材が必要。
+- **モバイル対応**：考慮のみ（タッチ操作なし）。
+
+## 7. パフォーマンス測定結果
+
+**未測定です。** こちらでは Unity を動かせないため、FPS・CPU・物理・AI の時間はまだ一つも測れていません。F2 の性能表示で実測できるようにしました。目標（PCで安定60FPS）を達成したかどうかは、この表示の数字を見るまで分かりません。
+
+## 8. 既知の不具合・注意点
+
+- Unity 6 本体でのコンパイルは未確認。今回 `NFWL.asmdef` を追加したので、もし「型が見つからない」エラーが出たら教えてください（以前のフォルダ構成で動いていたものが別アセンブリに分かれたため）。
+- Test Framework パッケージの追加で、初回のプロジェクトを開く時間が少し延びます。
+- セーブリプレイ中は試合が一時停止します（キャッチして試合が止まる場面だけに限定しています）。
+- AI の数値（役割の切り替え、パスやシュートの点数）は実際の試合を見ての調整がまだです。シュートが少なすぎる・多すぎるなどの偏りが出る可能性があります。
+- GKのセーブ姿勢・ダイブの角度は数値で作ったもので、見た目の確認はまだです。
+
+## 9. 次に実装すべき内容
+
+1. Mac で Unity を開いてコンパイルとテストを実行し、落ちたテストと F2 の数値をもとに修正（最優先）。
+2. 実際の試合を見ながら AI・GK・キックの数値を調整（`NFWLTuning` に AI の値も移す）。
+3. PHASE 10 の残り：クリスタル装飾の揺れと発光、手のポーズ、関節の可動域。
+4. 本格的な人型モデル・モーション素材へ差し替えるためのアニメーション共通インターフェース。
+5. スローイン・コーナー・ゴールキック、オーバーラップとワンツー、時間とスコアによるAIの判断。
