@@ -29,6 +29,8 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime;
 
+        public const string Version = "NFWL Unity v0.5  Crystalia";
+
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
         static readonly Color Gold = new Color(1f, 0.78f, 0.2f);
@@ -509,6 +511,8 @@ namespace NFWL
 
             DrawPlayerTags();
             DrawScoreboard();
+            // Version stamp, so it is easy to tell which build is running.
+            Label(new Rect(Screen.width - 260f, 14f, 244f, 20f), Version, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 1f, 1f, 0.6f), false);
             DrawEvent();
             DrawPlayerCard();
             DrawPowerGauge();
@@ -649,5 +653,6 @@ namespace NFWL
     static class GUIStyleExt
     {
         public static GUIStyle WithSize(this GUIStyle s, int size) => new GUIStyle(s) { fontSize = size };
+        public static GUIStyle WithAlign(this GUIStyle s, TextAnchor a) => new GUIStyle(s) { alignment = a };
     }
 }
