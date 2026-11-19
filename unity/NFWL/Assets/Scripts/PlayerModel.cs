@@ -13,15 +13,29 @@ namespace NFWL
     public class PlayerModel : MonoBehaviour
     {
         Transform body, hips, torso, head;
-        Transform legL, legR, kneeL, kneeR, armL, armR, elbowL, elbowR;
+        Transform legL, legR, kneeL, kneeR, ankleL, ankleR, armL, armR, elbowL, elbowR;
 
         PlayerController owner;
-        float phase;
         float kickTimer = -1f;
         float diveTimer = -1f;
         float diveSide = 1f;
         float celebrateTimer = -1f;
         float lean;
+        float heightScale = 1f;
+        readonly GaitController gait = new GaitController();
+        float ikWeightL = 1f, ikWeightR = 1f;
+        float pelvisDrop;
+
+        // Leg proportions of the built model (unscaled metres).
+        const float HipHeight = 0.95f;
+        const float ThighLength = 0.44f;
+        const float ShinLength = 0.42f;   // knee to ankle
+        const float AnkleHeight = 0.075f; // ankle above the sole
+
+        /// <summary>The feet (planted / swinging), for touches, kicks and tests.</summary>
+        public GaitController Gait => gait;
+        /// <summary>How far a planted foot was out of the leg's reach last frame (m). ~0 = no sliding.</summary>
+        public float FootReachError { get; private set; }
 
         const float KickTime = 0.32f;
         const float DiveTime = 0.9f;
@@ -33,6 +47,7 @@ namespace NFWL
             m.owner = owner;
             m.transform.SetParent(root, false);
             m.transform.localScale = Vector3.one * heightScale;
+            m.heightScale = heightScale;
 
             Material shirt = Visuals.Mat(kit.body, 0.3f);
             Material trim = Visuals.Mat(kit.trim, 0.5f);
@@ -77,8 +92,8 @@ namespace NFWL
             m.armL = BuildArm(m.torso, -1f, shirt, trim, limbSkin, crystal, out m.elbowL);
             m.armR = BuildArm(m.torso, 1f, shirt, trim, limbSkin, crystal, out m.elbowR);
 
-            m.legL = BuildLeg(m.hips, -1f, shorts, limbSkin, socks, trim, boots, crystal, out m.kneeL);
-            m.legR = BuildLeg(m.hips, 1f, shorts, limbSkin, socks, trim, boots, crystal, out m.kneeR);
+            m.legL = BuildLeg(m.hips, -1f, shorts, limbSkin, socks, trim, boots, crystal, out m.kneeL, out m.ankleL);
+            m.legR = BuildLeg(m.hips, 1f, shorts, limbSkin, socks, trim, boots, crystal, out m.kneeR, out m.ankleR);
 
             // Soft glow on the grass in the element colour (also helps to see players from the high camera).
             GameObject blob = Visuals.Part(PrimitiveType.Cylinder, m.transform, new Vector3(0f, 0.012f, 0f), new Vector3(0.65f, 0.002f, 0.65f),
@@ -149,7 +164,7 @@ namespace NFWL
             return shoulder;
         }
 
-        static Transform BuildLeg(Transform hips, float side, Material shorts, Material skin, Material sock, Material trim, Material boot, Material crystal, out Transform knee)
+        static Transform BuildLeg(Transform hips, float side, Material shorts, Material skin, Material sock, Material trim, Material boot, Material crystal, out Transform knee, out Transform ankle)
         {
             Transform hip = Visuals.Pivot(hips, new Vector3(side * 0.1f, 0f, 0f), side < 0 ? "LegL" : "LegR");
             Visuals.Part(PrimitiveType.Capsule, hip, new Vector3(0f, -0.1f, 0f), new Vector3(0.17f, 0.12f, 0.17f), shorts, "ShortsLeg");
@@ -157,7 +172,9 @@ namespace NFWL
             knee = Visuals.Pivot(hip, new Vector3(0f, -0.44f, 0f), "Knee");
             Visuals.Part(PrimitiveType.Capsule, knee, new Vector3(0f, -0.22f, 0f), new Vector3(0.12f, 0.22f, 0.12f), sock, "Shin");
             Visuals.Part(PrimitiveType.Cylinder, knee, new Vector3(0f, -0.04f, 0f), new Vector3(0.125f, 0.015f, 0.125f), trim, "SockBand");
-            Visuals.Part(PrimitiveType.Cube, knee, new Vector3(0f, -0.46f, 0.05f), new Vector3(0.11f, 0.07f, 0.27f), boot, "Boot");
+            // Ankle joint, so the boot can stay flat on the grass while the shin moves (foot IK).
+            ankle = Visuals.Pivot(knee, new Vector3(0f, -ShinLength, 0f), "Ankle");
+            Visuals.Part(PrimitiveType.Cube, ankle, new Vector3(0f, -0.04f, 0.05f), new Vector3(0.11f, 0.07f, 0.27f), boot, "Boot");
             // Crystal greaves on the shin, pointing up past the knee (all designs).
             for (int i = 0; i < 3; i++)
             {
@@ -174,95 +191,25 @@ namespace NFWL
 
         public void PlayCelebrate() { celebrateTimer = 0f; }
 
-        void Update()
+        /// <summary>Animation runs after all movement this frame, so planted feet stay exactly in place.</summary>
+        void LateUpdate()
         {
             if (owner == null) return;
             float dt = Time.deltaTime;
+            if (dt <= 0f) return;
             PlayerLocomotion lc = owner.Locomotion;
             float speed = lc.Speed;
-            float run = Mathf.Clamp01(speed / 6.5f);
             LocoState st = lc.State;
-            Vector3 lv = lc.LocalVelocity;
-
-            // Which way the legs cycle: forward, backwards (backpedal) or sideways (side step / jockey).
-            bool sideways = speed > 0.3f && Mathf.Abs(lv.x) > Mathf.Abs(lv.z);
-            bool backwards = !sideways && lv.z < -0.2f;
+            float sc = heightScale;
+            Vector3 root = owner.transform.position;
             bool crouch = st == LocoState.Jockey || st == LocoState.SideStep || st == LocoState.Backpedal;
 
-            // Run cycle: stride frequency rises with speed.
-            phase += dt * (4f + speed * 1.6f);
-            float s = Mathf.Sin(phase);
-            float amp = Mathf.Lerp(0f, 50f, run);
-            if (backwards) amp *= -0.75f;
-            if (sideways) amp *= 0.35f;
-
-            float legLAngle = s * amp;
-            float legRAngle = -s * amp;
-            float kneeLAngle = Mathf.Max(0f, Mathf.Sin(phase + 1.2f)) * Mathf.Abs(amp) * 1.4f + 5f;
-            float kneeRAngle = Mathf.Max(0f, Mathf.Sin(phase + 1.2f + Mathf.PI)) * Mathf.Abs(amp) * 1.4f + 5f;
-            float legLSide = 0f, legRSide = 0f;
-            if (sideways)
-            {
-                // Side shuffle: legs open and close instead of swinging forward.
-                float open = Mathf.Abs(s) * Mathf.Clamp01(speed / 3f) * 16f;
-                legLSide = -open;
-                legRSide = open;
-            }
-            if (crouch)
-            {
-                kneeLAngle += 22f;
-                kneeRAngle += 22f;
-                legLAngle -= 10f;
-                legRAngle -= 10f;
-            }
-            if (st == LocoState.SharpTurn)
-            {
-                // Plant: brace with the outside leg forward.
-                legLAngle = Mathf.Lerp(legLAngle, -28f, 0.6f);
-                legRAngle = Mathf.Lerp(legRAngle, 12f, 0.6f);
-                kneeLAngle = Mathf.Max(kneeLAngle, 30f);
-            }
-
-            // Kick: wind up then swing the right leg through.
-            if (kickTimer >= 0f)
-            {
-                kickTimer += dt;
-                float k = kickTimer / KickTime;
-                if (k >= 1f) kickTimer = -1f;
-                else
-                {
-                    float swing = k < 0.4f ? Mathf.Lerp(0f, 50f, k / 0.4f) : Mathf.Lerp(50f, -75f, (k - 0.4f) / 0.6f);
-                    legRAngle = swing;
-                    kneeRAngle = k < 0.4f ? 70f * (k / 0.4f) : Mathf.Lerp(70f, 0f, (k - 0.4f) / 0.6f);
-                    legLAngle = -10f;
-                    legLSide = legRSide = 0f;
-                }
-            }
-
-            legL.localRotation = Quaternion.Euler(legLAngle, 0f, legLSide);
-            legR.localRotation = Quaternion.Euler(legRAngle, 0f, legRSide);
-            kneeL.localRotation = Quaternion.Euler(kneeLAngle, 0f, 0f);
-            kneeR.localRotation = Quaternion.Euler(kneeRAngle, 0f, 0f);
-
-            // Arms swing opposite to legs, bent at the elbow. Off balance or jockeying: arms out wide.
-            float armAmp = Mathf.Abs(amp) * 0.8f;
-            float armOut = st == LocoState.Recovery ? 45f : crouch ? 22f : 8f;
-            armL.localRotation = Quaternion.Euler(-s * armAmp, 0f, -armOut);
-            armR.localRotation = Quaternion.Euler(s * armAmp, 0f, armOut);
-            elbowL.localRotation = Quaternion.Euler(-25f - run * 40f, 0f, 0f);
-            elbowR.localRotation = Quaternion.Euler(-25f - run * 40f, 0f, 0f);
-
-            // Lean from the locomotion (speed, acceleration, braking inertia, balance) and body bob.
-            lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 12f : 0f), 1f - Mathf.Exp(-14f * dt));
-            float drop = crouch ? 0.08f : st == LocoState.SharpTurn ? 0.06f : 0f;
-            hips.localPosition = new Vector3(0f, 0.95f - drop + Mathf.Abs(Mathf.Cos(phase)) * 0.05f * run, 0f);
-            torso.localRotation = Quaternion.Euler(lean, Mathf.Sin(phase) * 6f * run, 0f);
-
-            // Lean into curves from the feet (the whole body tilts).
-            Quaternion bodyRot = Quaternion.Euler(0f, 0f, lc.LeanRoll);
+            // ---------- full-body overrides (dive, celebration) ----------
+            Quaternion bodyRot = Quaternion.Euler(0f, 0f, lc.LeanRoll); // lean into curves from the feet
             Vector3 bodyPos = Vector3.zero;
+            bool airborne = false;
+            float armOverrideL = float.NaN, armOverrideR = float.NaN;
 
-            // Goalkeeper dive: roll to the side and drop.
             if (diveTimer >= 0f)
             {
                 diveTimer += dt;
@@ -273,12 +220,11 @@ namespace NFWL
                     float w = d < 0.3f ? d / 0.3f : 1f - Mathf.Clamp01((d - 0.6f) / 0.4f);
                     bodyRot = Quaternion.Euler(0f, 0f, -diveSide * 75f * w);
                     bodyPos = new Vector3(diveSide * 0.6f * w, 0.25f * w, 0f);
-                    armL.localRotation = Quaternion.Euler(0f, 0f, -150f * w);
-                    armR.localRotation = Quaternion.Euler(0f, 0f, 150f * w);
+                    armOverrideL = -150f * w;
+                    armOverrideR = 150f * w;
+                    airborne = w > 0.1f;
                 }
             }
-
-            // Celebration: jump with both arms up.
             if (celebrateTimer >= 0f)
             {
                 celebrateTimer += dt;
@@ -287,13 +233,128 @@ namespace NFWL
                 {
                     float j = Mathf.Abs(Mathf.Sin(celebrateTimer * 7f));
                     bodyPos.y += j * 0.35f;
-                    armL.localRotation = Quaternion.Euler(0f, 0f, -160f + j * 20f);
-                    armR.localRotation = Quaternion.Euler(0f, 0f, 160f - j * 20f);
+                    armOverrideL = -160f + j * 20f;
+                    armOverrideR = 160f - j * 20f;
+                    airborne = true;
                 }
             }
-
             body.localRotation = bodyRot;
             body.localPosition = bodyPos;
+
+            // ---------- feet (gait with foot locking) ----------
+            bool kicking = kickTimer >= 0f;
+            gait.Right.overridden = kicking;
+            gait.Left.overridden = false;
+            bool pivoting = st == LocoState.PivotTurn || st == LocoState.SharpTurn || speed < 0.35f;
+            gait.Tick(root, lc.Velocity, lc.FacingYaw, dt, sc, crouch ? 1.9f : 1f, pivoting);
+            float run = gait.RunAmount;
+
+            // IK weights: feet follow the ground unless the body is in the air or a kick drives the leg.
+            ikWeightL = Mathf.MoveTowards(ikWeightL, airborne ? 0f : 1f, dt * 8f);
+            ikWeightR = Mathf.MoveTowards(ikWeightR, airborne || kicking ? 0f : 1f, dt * (kicking ? 30f : 8f));
+
+            // ---------- pelvis: height, bob, twist ----------
+            // Bob: lowest at mid-stance, twice per cycle.
+            float bob = Mathf.Cos(gait.Phase * Mathf.PI * 4f - gait.StanceFraction * Mathf.PI * 2f) * 0.035f * run;
+            float crouchDrop = crouch ? 0.1f : st == LocoState.SharpTurn ? 0.07f : st == LocoState.Recovery ? 0.05f : 0f;
+            // Pelvis twists toward the leg that swings forward; shoulders twist the other way.
+            float legSignal = LegForwardSignal();
+            float pelvisYaw = legSignal * 9f * run;
+            float pelvisRoll = -legSignal * 2.5f * run;
+            hips.localRotation = Quaternion.Euler(0f, pelvisYaw, pelvisRoll);
+            hips.localPosition = new Vector3(0f, HipHeight - crouchDrop - bob, 0f);
+
+            // Pelvis height adjustment: lower the hips just enough that both planted feet stay in reach,
+            // so the feet never have to slide.
+            float legLen = (ThighLength + ShinLength) * sc * 0.985f;
+            float needDrop = Mathf.Max(RequiredDrop(legL, gait.Left, ikWeightL, legLen, sc), RequiredDrop(legR, gait.Right, ikWeightR, legLen, sc));
+            float targetDrop = Mathf.Clamp(needDrop / sc, 0f, 0.16f);
+            pelvisDrop = Mathf.Max(targetDrop, Mathf.MoveTowards(pelvisDrop, targetDrop, dt * 0.9f));
+            hips.localPosition = new Vector3(0f, HipHeight - crouchDrop - bob - pelvisDrop, 0f);
+
+            // ---------- upper body ----------
+            lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 14f : 0f), 1f - Mathf.Exp(-14f * dt));
+            torso.localRotation = Quaternion.Euler(lean, -pelvisYaw * 1.6f, -pelvisRoll);
+            head.localRotation = Quaternion.Euler(-lean * 0.5f, pelvisYaw * 0.6f, 0f); // eyes stay on the play
+
+            // Arms swing opposite to the legs, bent at the elbow. Off balance or jockeying: arms out wide.
+            float armAmp = Mathf.Lerp(12f, 55f, run);
+            float armOut = st == LocoState.Recovery ? 45f : crouch ? 24f : 8f + run * 4f;
+            armL.localRotation = Quaternion.Euler(float.IsNaN(armOverrideL) ? legSignal * armAmp : 0f, 0f, float.IsNaN(armOverrideL) ? -armOut : armOverrideL);
+            armR.localRotation = Quaternion.Euler(float.IsNaN(armOverrideR) ? -legSignal * armAmp : 0f, 0f, float.IsNaN(armOverrideR) ? armOut : armOverrideR);
+            float elbow = -20f - run * 65f;
+            elbowL.localRotation = Quaternion.Euler(elbow + Mathf.Max(0f, legSignal) * 15f * run, 0f, 0f);
+            elbowR.localRotation = Quaternion.Euler(elbow + Mathf.Max(0f, -legSignal) * 15f * run, 0f, 0f);
+
+            // ---------- legs ----------
+            FootReachError = 0f;
+            SolveLeg(legL, kneeL, ankleL, gait.Left, ikWeightL, 0f, 0f, sc);
+            float kickHip = 0f, kickKnee = 0f;
+            if (kicking)
+            {
+                kickTimer += dt;
+                float k = kickTimer / KickTime;
+                if (k >= 1f) kickTimer = -1f;
+                else
+                {
+                    // Wind up then swing the right leg through (full kick system comes in STEP 5).
+                    kickHip = k < 0.4f ? Mathf.Lerp(0f, 50f, k / 0.4f) : Mathf.Lerp(50f, -75f, (k - 0.4f) / 0.6f);
+                    kickKnee = k < 0.4f ? 70f * (k / 0.4f) : Mathf.Lerp(70f, 0f, (k - 0.4f) / 0.6f);
+                    // Keep the swinging foot's position known to the gait so it re-plants where it ends.
+                    gait.Right.position = ankleR.position - Vector3.up * AnkleHeight * sc;
+                    gait.Right.yaw = lc.FacingYaw;
+                }
+            }
+            SolveLeg(legR, kneeR, ankleR, gait.Right, ikWeightR, kickHip, kickKnee, sc);
+        }
+
+        /// <summary>+1 when the left leg is swinging forward / right leg back, -1 the other way.</summary>
+        float LegForwardSignal()
+        {
+            if (!gait.Moving && !gait.Left.swinging && !gait.Right.swinging) return 0f;
+            Vector3 fwd = owner.Locomotion.Facing;
+            float l = Vector3.Dot(gait.Left.position - owner.transform.position, fwd);
+            float r = Vector3.Dot(gait.Right.position - owner.transform.position, fwd);
+            return Mathf.Clamp((l - r) / (0.6f * heightScale), -1f, 1f);
+        }
+
+        /// <summary>How far (world m) the hips must drop for this foot to be reachable.</summary>
+        float RequiredDrop(Transform hip, GaitController.Foot foot, float weight, float legLen, float sc)
+        {
+            if (weight < 0.5f) return 0f;
+            Vector3 target = foot.position + foot.normal * (AnkleHeight * sc);
+            Vector3 h = hip.position;
+            float dx = h.x - target.x, dz = h.z - target.z;
+            float hd2 = dx * dx + dz * dz;
+            if (hd2 >= legLen * legLen) return 0.16f * sc; // too far sideways: drop as much as allowed
+            float maxY = target.y + Mathf.Sqrt(legLen * legLen - hd2);
+            return Mathf.Max(0f, h.y - maxY);
+        }
+
+        /// <summary>Two-bone IK toward the gait foot, blended with a forward-kinematics pose by weight.</summary>
+        void SolveLeg(Transform hip, Transform knee, Transform ankle, GaitController.Foot foot, float weight, float fkHip, float fkKnee, float sc)
+        {
+            // FK pose (used in the air and while a kick drives the leg).
+            hip.localRotation = Quaternion.Euler(fkHip, 0f, 0f);
+            knee.localRotation = Quaternion.Euler(fkKnee + 5f, 0f, 0f);
+            ankle.localRotation = Quaternion.Euler(fkHip != 0f ? 25f : 0f, 0f, 0f);
+            if (weight <= 0.001f) return;
+
+            Quaternion fkHipW = hip.rotation, fkKneeW = knee.rotation, fkAnkleW = ankle.rotation;
+            Vector3 footFwd = Quaternion.Euler(0f, foot.yaw, 0f) * Vector3.forward;
+            Vector3 target = foot.position + foot.normal * (AnkleHeight * sc);
+            // Knee points where the foot points, a little outward.
+            Vector3 pole = footFwd + Quaternion.Euler(0f, foot.yaw, 0f) * Vector3.right * (foot.side * 0.12f) + Vector3.up * 0.05f;
+            float miss = LegIK.SolveKnee(hip.position, target, ThighLength * sc, ShinLength * sc, pole, out Vector3 kneePos, out Vector3 reached);
+            if (!foot.swinging) FootReachError = Mathf.Max(FootReachError, miss);
+
+            Quaternion hipW = LegIK.BoneRotation(hip.position, kneePos, pole);
+            Quaternion kneeW = LegIK.BoneRotation(kneePos, reached, pole);
+            Quaternion ankleW = Quaternion.FromToRotation(Vector3.up, foot.normal) * Quaternion.Euler(foot.pitch, foot.yaw, 0f);
+
+            hip.rotation = Quaternion.Slerp(fkHipW, hipW, weight);
+            knee.rotation = Quaternion.Slerp(fkKneeW, kneeW, weight);
+            ankle.rotation = Quaternion.Slerp(fkAnkleW, ankleW, weight);
         }
     }
 }
