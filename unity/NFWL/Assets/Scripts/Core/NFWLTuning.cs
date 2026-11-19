@@ -13,6 +13,8 @@ namespace NFWL
     public class NFWLTuning : ScriptableObject
     {
         public LocomotionTuning locomotion = new LocomotionTuning();
+        public DribbleTuning dribble = new DribbleTuning();
+        public BallTuning ball = new BallTuning();
 
         static NFWLTuning instance;
 
@@ -92,5 +94,52 @@ namespace NFWL
         public float sharpTurnBalanceCost = 0.18f;
         [Tooltip("Balance regained per second at Agility 40 / 99")]
         public Vector2 balanceRecovery = new Vector2(0.7f, 1.5f);
+    }
+
+    /// <summary>Ball flight and roll (PHASE 4). Mass 0.40 kg and radius 0.11 m stay in PitchDims / Ball.</summary>
+    [System.Serializable]
+    public class BallTuning
+    {
+        [Tooltip("Rolling resistance on grass (m/s^2)")]
+        public float rollingDecel = 0.8f;
+        [Tooltip("Drag coefficient of the ball (about 0.25 at shot speed)")]
+        public float dragCoefficient = 0.25f;
+        public float airDensity = 1.2f;
+        public float restitution = 0.55f;
+
+        /// <summary>Quadratic drag factor k in a = k * v^2 (1/m).</summary>
+        public float DragK => 0.5f * airDensity * dragCoefficient * Mathf.PI * PitchDims.BallRadius * PitchDims.BallRadius / 0.40f;
+    }
+
+    /// <summary>Touch dribbling (PHASE 2). Ability-driven values are [at 40, at 99].</summary>
+    [System.Serializable]
+    public class DribbleTuning
+    {
+        [Tooltip("Seconds between touches: normal dribble, BallControl 40 / 99")]
+        public Vector2 normalInterval = new Vector2(0.62f, 0.44f);
+        [Tooltip("Seconds between touches at sprint: a longer interval = the ball is knocked further ahead")]
+        public Vector2 sprintInterval = new Vector2(1.6f, 1.25f);
+        [Tooltip("Seconds between touches in close control")]
+        public Vector2 closeInterval = new Vector2(0.4f, 0.27f);
+        [Tooltip("Fastest re-touch for a change of direction, Agility 40 / 99")]
+        public Vector2 minRetouch = new Vector2(0.3f, 0.16f);
+        [Tooltip("Touch direction error in degrees, BallControl 40 / 99")]
+        public Vector2 touchErrorDeg = new Vector2(7f, 1.5f);
+        [Tooltip("Touch speed error (fraction), BallControl 40 / 99")]
+        public Vector2 touchSpeedError = new Vector2(0.12f, 0.03f);
+        [Tooltip("Where the next touch meets the ball, ahead of the body (m)")]
+        public float contactAhead = 0.4f;
+        [Tooltip("The ball can be touched within this distance of the player")]
+        public float reach = 0.95f;
+        [Tooltip("Opponent closer than this switches to close control")]
+        public float closeControlDistance = 2.6f;
+        [Tooltip("An input this many degrees off the ball's path makes a directional touch")]
+        public float directionalAngle = 35f;
+        [Tooltip("Owner loses the ball beyond this distance (m)")]
+        public float loseDistance = 3.2f;
+        [Tooltip("Small assist that keeps the ball on the planned line, per second, BallControl 40 / 99")]
+        public Vector2 lineAssist = new Vector2(0.8f, 2.5f);
+        [Tooltip("Opponent closer than this behind or beside a slow player makes him shield the ball")]
+        public float shieldDistance = 1.8f;
     }
 }

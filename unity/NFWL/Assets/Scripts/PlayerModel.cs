@@ -185,6 +185,141 @@ namespace NFWL
             return hip;
         }
 
+        // ---------------- foot actions (touches now, kicks and tackles later) ----------------
+
+        struct FootAction
+        {
+            public bool active, started;
+            public float side;
+            public float start, contact, end;
+            public Vector3 startPos;
+            public float startYaw;
+            public Vector3 ball;   // ball centre at contact (updated until contact)
+            public Vector3 dir;    // direction the ball is played
+            public FootStyle style;
+            public float backswing, follow;
+            public Vector3 contactPos;
+            public float contactYaw, contactPitch;
+        }
+        FootAction action;
+
+        public bool FootActionActive => action.active;
+
+        /// <summary>
+        /// Swings one foot so it arrives at the ball exactly at contactTime, then follows through.
+        /// The ball velocity is changed by the caller at contactTime, so foot and ball stay in sync.
+        /// </summary>
+        public void BeginFootAction(float side, float startTime, float contactTime, float endTime, FootStyle style,
+            Vector3 dir, Vector3 ballAtContact, float backswing, float followThrough)
+        {
+            dir.y = 0f;
+            action = new FootAction
+            {
+                active = true,
+                started = false,
+                side = side < 0f ? -1f : 1f,
+                start = startTime,
+                contact = Mathf.Max(contactTime, startTime + 0.02f),
+                end = Mathf.Max(endTime, contactTime + 0.05f),
+                ball = ballAtContact,
+                dir = dir.sqrMagnitude > 0.0001f ? dir.normalized : owner.Locomotion.Facing,
+                style = style,
+                backswing = backswing,
+                follow = followThrough
+            };
+        }
+
+        /// <summary>Keeps the swinging foot aimed at where the ball will be at contact.</summary>
+        public void UpdateFootActionBall(Vector3 ballAtContact)
+        {
+            if (action.active && Time.time < action.contact) action.ball = ballAtContact;
+        }
+
+        public void CancelFootAction() => action.active = false;
+
+        /// <summary>Sole point, yaw and pitch of a foot that meets the ball with the given part.</summary>
+        void ContactPose(out Vector3 pos, out float yaw, out float pitch)
+        {
+            float r = PitchDims.BallRadius;
+            Vector3 g = new Vector3(action.ball.x, 0f, action.ball.z);
+            float dirYaw = PlayerLocomotion.DirToYaw(action.dir, owner.Locomotion.FacingYaw);
+            Vector3 d = action.dir;
+            float side = action.side;
+            switch (action.style)
+            {
+                case FootStyle.Inside:
+                    // Foot turned out so its inside faces the play.
+                    yaw = dirYaw + side * 70f;
+                    pitch = 0f;
+                    pos = g - d * (r + 0.06f) - PlayerLocomotion.YawToDir(yaw) * 0.05f;
+                    break;
+                case FootStyle.Outside:
+                    yaw = dirYaw - side * 40f;
+                    pitch = 5f;
+                    pos = g - d * (r + 0.05f) - PlayerLocomotion.YawToDir(yaw) * 0.08f;
+                    break;
+                case FootStyle.Sole:
+                    yaw = owner.Locomotion.FacingYaw;
+                    pitch = -18f;
+                    pos = g + Vector3.up * (2f * r - 0.02f) - PlayerLocomotion.YawToDir(yaw) * 0.1f;
+                    break;
+                case FootStyle.Toe:
+                    yaw = dirYaw;
+                    pitch = 0f;
+                    pos = g - d * (r + 0.22f);
+                    break;
+                default: // laces / instep: toe pointed down, ankle locked
+                    yaw = dirYaw;
+                    pitch = 40f;
+                    pos = g - d * (r + 0.1f) + Vector3.up * 0.06f;
+                    break;
+            }
+        }
+
+        /// <summary>Writes the action foot's pose into the gait foot. Returns false when no action runs.</summary>
+        bool ApplyFootAction(float now)
+        {
+            if (!action.active) return false;
+            GaitController.Foot foot = gait.Get(action.side);
+            if (!action.started)
+            {
+                action.started = true;
+                action.startPos = foot.position;
+                action.startYaw = foot.yaw;
+            }
+            if (now >= action.end)
+            {
+                action.active = false;
+                return false;
+            }
+
+            if (now < action.contact)
+            {
+                ContactPose(out action.contactPos, out action.contactYaw, out action.contactPitch);
+                float u = Mathf.Clamp01((now - action.start) / (action.contact - action.start));
+                // Quadratic curve through a backswing point behind and above the contact point.
+                Vector3 back = action.contactPos - action.dir * action.backswing + Vector3.up * (0.05f + action.backswing * 0.6f);
+                Vector3 a = Vector3.Lerp(action.startPos, back, u);
+                Vector3 b = Vector3.Lerp(back, action.contactPos, u);
+                foot.position = Vector3.Lerp(a, b, u);
+                float e = u * u * (3f - 2f * u);
+                foot.yaw = Mathf.LerpAngle(action.startYaw, action.contactYaw, e);
+                foot.pitch = Mathf.Lerp(15f, action.contactPitch, e);
+            }
+            else
+            {
+                // Follow through along the line of the ball, then come down to plant.
+                float v = Mathf.Clamp01((now - action.contact) / (action.end - action.contact));
+                float ease = 1f - (1f - v) * (1f - v);
+                Vector3 basePos = action.contactPos + action.dir * (action.follow * ease);
+                basePos.y = Mathf.Lerp(action.contactPos.y, 0f, ease);
+                foot.position = basePos + Vector3.up * (Mathf.Sin(v * Mathf.PI) * (0.04f + action.follow * 0.25f));
+                foot.yaw = Mathf.LerpAngle(action.contactYaw, owner.Locomotion.FacingYaw, v * v);
+                foot.pitch = Mathf.Lerp(action.contactPitch, 0f, v);
+            }
+            return true;
+        }
+
         public void PlayKick() { kickTimer = 0f; }
 
         public void PlayDive(float side) { diveTimer = 0f; diveSide = Mathf.Sign(side == 0f ? 1f : side); }
@@ -243,10 +378,14 @@ namespace NFWL
 
             // ---------- feet (gait with foot locking) ----------
             bool kicking = kickTimer >= 0f;
-            gait.Right.overridden = kicking;
-            gait.Left.overridden = false;
+            float now = Time.time;
+            bool actionLeft = action.active && action.side < 0f && now < action.end;
+            bool actionRight = action.active && action.side > 0f && now < action.end;
+            gait.Right.overridden = kicking || actionRight;
+            gait.Left.overridden = actionLeft;
             bool pivoting = st == LocoState.PivotTurn || st == LocoState.SharpTurn || speed < 0.35f;
             gait.Tick(root, lc.Velocity, lc.FacingYaw, dt, sc, crouch ? 1.9f : 1f, pivoting);
+            ApplyFootAction(now);
             float run = gait.RunAmount;
 
             // IK weights: feet follow the ground unless the body is in the air or a kick drives the leg.
@@ -346,7 +485,7 @@ namespace NFWL
             // Knee points where the foot points, a little outward.
             Vector3 pole = footFwd + Quaternion.Euler(0f, foot.yaw, 0f) * Vector3.right * (foot.side * 0.12f) + Vector3.up * 0.05f;
             float miss = LegIK.SolveKnee(hip.position, target, ThighLength * sc, ShinLength * sc, pole, out Vector3 kneePos, out Vector3 reached);
-            if (!foot.swinging) FootReachError = Mathf.Max(FootReachError, miss);
+            if (!foot.swinging && !foot.overridden) FootReachError = Mathf.Max(FootReachError, miss);
 
             Quaternion hipW = LegIK.BoneRotation(hip.position, kneePos, pole);
             Quaternion kneeW = LegIK.BoneRotation(kneePos, reached, pole);

@@ -29,7 +29,7 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime;
 
-        public const string Version = "NFWL Unity v0.6-dev  STEP 3";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 4";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -147,6 +147,11 @@ namespace NFWL
                     int level = t == 0 ? 70 + (int)rarities[i] * 4 : awayLevel;
                     PlayerAttributes attrs = PlayerAttributes.Random(level, rnd);
                     if (s.role == Role.GK) attrs.Goalkeeping = Mathf.Clamp(level + 8, 40, 99);
+                    // v0.6: preferred foot and weak foot from a separate generator, so the abilities above
+                    // stay exactly as in v0.5. About one player in four is left-footed.
+                    var footRnd = new System.Random(5000 + t * 100 + s.number);
+                    attrs.PreferredFoot = footRnd.NextDouble() < 0.25 ? PreferredFoot.Left : PreferredFoot.Right;
+                    attrs.WeakFootRating = Mathf.Clamp(2 + footRnd.Next(0, 3) + (t == 0 && rarities[i] >= Rarity.Mythic ? 1 : 0), 1, 5);
                     // Kits from the design sheet: HOME black, AWAY white, keepers THIRD purple / teal.
                     KitStyle kit = s.role == Role.GK ? (t == 0 ? KitStyle.Third : KitStyle.AwayKeeper) : (t == 0 ? KitStyle.Home : KitStyle.Away);
                     PlayerController p = PlayerController.Create(t, s.role, s.number, s.name,
@@ -617,6 +622,8 @@ namespace NFWL
             Label(new Rect(x + 78f, y + 34f, w - 84f, 18f), $"#{human.number}  CRYSTALIA / {human.element.name}", smallStyle, new Color(1f, 1f, 1f, 0.7f), false);
             Box(new Rect(x + 78f, y + 54f, 86f, 16f), rc);
             Label(new Rect(x + 78f, y + 54f, 86f, 16f), human.rarity.ToString().ToUpper(), tagStyle, new Color(0.05f, 0.07f, 0.15f), false);
+            // v0.6: preferred foot and weak-foot stars.
+            Label(new Rect(x + 168f, y + 54f, 60f, 16f), $"{(a.PreferredFoot == PreferredFoot.Left ? "L" : "R")}  WF{a.WeakFootRating}", tagStyle, new Color(1f, 1f, 1f, 0.75f), false);
 
             string[] names = { "SPD", "DRI", "PAS", "SHO" };
             int[] vals =
@@ -644,6 +651,7 @@ namespace NFWL
             PlayerLocomotion lc = human.Locomotion;
             float slipCm = human.Model != null ? human.Model.FootReachError * 100f : 0f;
             string text = $"{lc.State}  {lc.Speed:0.0} m/s  lean {lc.LeanPitch:0}/{lc.LeanRoll:0}  bal {lc.Balance:0.00}  foot {slipCm:0.0}cm";
+            if (human.HasBall) text = $"TOUCH {human.Dribble.LastKind}{(human.Dribble.Shielding ? " (SHIELD)" : "")}   " + text;
             Label(new Rect(Screen.width - 420f, 34f, 404f, 20f), text, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(0.6f, 1f, 0.8f, 0.8f), false);
         }
 
