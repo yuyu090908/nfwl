@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace NFWL
@@ -25,11 +26,7 @@ namespace NFWL
 
         [Header("Dribble (Full Spec 3.6 / 3.7)")]
         public float controlRadius = 0.9f;
-        public float loseRadius = 2.5f;
         public float maxTrapRelativeSpeed = 18f;
-        public float normalTouchDistance = 0.7f;
-        public float sprintTouchDistance = 1.9f;
-        public float tackleRadius = 1.0f;
 
         [Header("Kick")]
         public float kickCooldown = 0.35f;
@@ -42,41 +39,102 @@ namespace NFWL
         public KeyCode longPassKey = KeyCode.L;
 
         public bool IsHuman { get; set; }
+        /// <summary>Moved by the user's keys (false for the user's player in AutoPlay).</summary>
+        public bool UserControlled => IsHuman && !(Match != null && Match.AutoPlay);
         public bool HasBall { get; private set; }
         public bool Sprinting { get; private set; }
-        public float Speed => new Vector3(velocity.x, 0f, velocity.z).magnitude;
-        public Vector3 Velocity => velocity;
+        public float Speed => loco.Speed;
+        public Vector3 Velocity => loco.Velocity;
+        /// <summary>Movement with momentum, body facing and balance (v0.6 PHASE 1).</summary>
+        public PlayerLocomotion Locomotion => loco;
         public PlayerModel Model { get; private set; }
         public MatchManager Match { get; set; }
         public float AttackSign => teamIndex == 0 ? 1f : -1f;
+        /// <summary>Touch dribbling (v0.6 PHASE 2).</summary>
+        public DribbleController Dribble => dribble;
+        /// <summary>Kick timeline (v0.6 PHASE 3).</summary>
+        public KickController Kick => kick;
+        /// <summary>Standing tackle (v0.6 PHASE 5).</summary>
+        public TackleController Tackle => tackle;
+        /// <summary>Goalkeeper positioning and saves (null for outfield players).</summary>
+        public GoalkeeperController Keeper => keeper;
+        public float LastBumpTime { get; set; } = -10f;
+        public PlayerController LastBumpWith { get; set; }
+
+        /// <summary>Wins the ball (a tackle that reached it).</summary>
+        public void GainBall()
+        {
+            if (ball == null || HasBall) return;
+            TakeBall();
+        }
+
+        /// <summary>Error multiplier for a foot (side -1 left, +1 right): 1 on the preferred foot, more on the weak foot.</summary>
+        public float WeakFootFactor(float side)
+        {
+            bool preferred = (side < 0f) == (attributes.PreferredFoot == PreferredFoot.Left);
+            if (preferred) return 1f;
+            float f = Mathf.Lerp(1.9f, 1f, (Mathf.Clamp(attributes.WeakFootRating, 1, 5) - 1) / 4f);
+            return Skills.WeakFootMaster(this) ? 1f + (f - 1f) * 0.5f : f;
+        }
+
+        readonly List<SkillId> skills = new List<SkillId>();
+        /// <summary>Extra skills (PHASE 11), limited by rarity: Epic 1, Mythic 2, Legendary 3.</summary>
+        public IReadOnlyList<SkillId> SkillList => skills;
+        public bool HasSkill(SkillId id) => skills.Contains(id);
+        public void SetSkills(List<SkillId> wanted)
+        {
+            skills.Clear();
+            skills.AddRange(Skills.Clamp(rarity, wanted));
+        }
 
         CharacterController controller;
         Ball ball;
         Vector2 moveInput;
-        Vector3 velocity;
+        readonly PlayerLocomotion loco = new PlayerLocomotion();
+        DribbleController dribble;
+        KickController kick;
+        TackleController tackle;
+        GoalkeeperController keeper;
+        Vector3 intendedVelocity;
+        float aiTackleCheck;
+        // Kick waiting for its contact (decided when the kick starts, struck at contact).
+        KickRequest strike;
+        float chestCooldownUntil;
+        Vector3 runTarget;
+        float runTargetUntil;
+
+        /// <summary>Time of the last ball deflection off this player's body (BallContacts).</summary>
+        public float LastBodyContactTime { get; set; } = -10f;
+
+        /// <summary>The ball bounced off this player's legs, torso or head.</summary>
+        public void OnBallHitBody(string part, float speed)
+        {
+            if (Model != null && part == "Torso") Model.PlayChest();
+            if (speed > 12f) loco.LoseBalance(Mathf.Clamp01(speed / 60f));
+            if (Match != null) Match.OnBodyContact(this, part, speed);
+        }
+
+        /// <summary>Name of the last kick (e.g. FINESSE SHOT, THROUGH PASS), for the HUD.</summary>
+        public string LastKickLabel { get; private set; } = "";
+        public float LastKickTime { get; private set; } = -10f;
         float noControlUntil;
-        float saveCooldownUntil;
 
         bool charging;
         KickType chargeType = KickType.ShortPass;
+        KickVariant chargeVariant = KickVariant.Normal;
         float chargeStartTime;
 
         bool kickBuffered;
         KickType bufferedType;
+        KickVariant bufferedVariant;
         float bufferedPower;
         bool bufferedTap;
+        Vector3? bufferedAim;
         float bufferedUntil;
-
-        float dashSpeed = 6.7f;
-        float runSpeed = 4.7f;
-        float maxAcceleration;
-        float brakingDeceleration;
-        float rotationRate;
 
         // AI state
         float aiNextDecision;
         float hadBallSince;
-        bool aiSprint;
 
         const float BodyRadius = 0.3f;
         const float BodyHeight = 1.8f;
@@ -94,6 +152,7 @@ namespace NFWL
             PlayerController pc = go.AddComponent<PlayerController>();
             pc.teamIndex = team;
             pc.role = role;
+            if (role == Role.GK) pc.keeper = new GoalkeeperController(pc);
             pc.number = number;
             pc.displayName = name;
             pc.rarity = rarity;
@@ -112,6 +171,9 @@ namespace NFWL
         void Awake()
         {
             controller = GetComponent<CharacterController>();
+            dribble = new DribbleController(this);
+            kick = new KickController(this);
+            tackle = new TackleController(this);
             ApplyAttributes();
         }
 
@@ -124,20 +186,8 @@ namespace NFWL
 
         public void ApplyAttributes()
         {
-            dashSpeed = Rules.AttrLerp(attributes.Speed, 6.0f, 7.4f);
-            runSpeed = dashSpeed * 0.7f;
-            float accelTime = Rules.AttrLerp(attributes.Acceleration, 1.6f, 1.0f);
-            maxAcceleration = dashSpeed / accelTime;
-            brakingDeceleration = dashSpeed / 0.3f;
-            rotationRate = Rules.AttrLerp(attributes.Agility, 420f, 720f);
-        }
-
-        float CurrentMaxSpeed()
-        {
-            float speed = Sprinting ? dashSpeed : runSpeed;
-            if (charging && chargeType == KickType.Shoot) speed *= 0.7f; // Full Spec 3.6.2
-            if (HasBall) speed *= 0.92f;
-            return speed;
+            // Speed / Acceleration / Agility drive the locomotion (values in NFWLTuning, v0.5 baseline).
+            loco.Configure(attributes, NFWLTuning.Current.locomotion);
         }
 
         // -------------------------------------------------------------------
@@ -152,24 +202,31 @@ namespace NFWL
                 moveInput = Vector2.zero;
                 Sprinting = false;
             }
-            else if (IsHuman)
+            else if (UserControlled)
             {
                 ReadInput();
             }
             else
             {
                 if (charging) charging = false;
+                long t0 = PerfStats.Begin();
                 ThinkAI();
+                PerfStats.End(PerfStats.Slot.AI, t0);
             }
-            Move(Time.deltaTime);
+            kick.Tick(Time.time);
+            if (Time.deltaTime > 0f) Move(Time.deltaTime); // paused (replay): nothing moves
 
             if (kickBuffered)
             {
                 if (Time.time > bufferedUntil) kickBuffered = false;
-                else if (HasBall)
+                else if (HasBall && BallInKickReach())
                 {
                     kickBuffered = false;
-                    PerformKick(bufferedType, bufferedPower, bufferedTap, null);
+                    PerformKick(bufferedType, bufferedPower, bufferedTap, bufferedAim, bufferedVariant);
+                }
+                else if (!HasBall && TryFirstTime(bufferedType, bufferedPower, bufferedTap, bufferedAim, bufferedVariant))
+                {
+                    kickBuffered = false;
                 }
             }
         }
@@ -185,7 +242,12 @@ namespace NFWL
 
             Sprinting = KeyInput.Get(sprintKey) || KeyInput.Get(KeyCode.RightShift);
 
-            HandleKickKey(shortPassKey, KickType.ShortPass);
+            if (KeyInput.Down(shortPassKey) && !HasBall && OpponentCarrierNear(2.6f))
+            {
+                // Defending: J is a standing tackle.
+                tackle.Begin(ball, Time.time);
+            }
+            else HandleKickKey(shortPassKey, KickType.ShortPass);
             HandleKickKey(longPassKey, KickType.LongPass);
             HandleKickKey(shootKey, KickType.Shoot);
         }
@@ -193,7 +255,37 @@ namespace NFWL
         void HandleKickKey(KeyCode key, KickType type)
         {
             if (KeyInput.Down(key)) BeginCharge(type);
+            if (charging && chargeType == type) chargeVariant = ReadVariant(type);
             if (KeyInput.Up(key)) ReleaseCharge(type);
+        }
+
+        /// <summary>
+        /// Modifier keys (configurable in NFWLTuning.input). Shift is the sprint key, so it only means
+        /// "power shot" when it was pressed just before or during the K press, not while already sprinting.
+        /// </summary>
+        KickVariant ReadVariant(KickType type)
+        {
+            InputTuning it = NFWLTuning.Current.input;
+            bool alt = KeyInput.Get(it.finesseModifier) || KeyInput.Get(KeyCode.RightAlt);
+            switch (type)
+            {
+                case KickType.ShortPass: return alt ? KickVariant.Through : KickVariant.Normal;
+                case KickType.LongPass: return alt ? KickVariant.LoftedThrough : KickVariant.Normal;
+            }
+            if (alt) return KickVariant.Finesse;
+            if (KeyInput.Get(it.lowModifier) || KeyInput.Get(KeyCode.RightControl)) return KickVariant.LowDriven;
+            bool shift = KeyInput.Get(it.powerModifier) || KeyInput.Get(KeyCode.RightShift);
+            if (shift && KeyInput.ShiftDownTime >= chargeStartTime - it.powerShiftWindow) return KickVariant.Power;
+            return KickVariant.Normal;
+        }
+
+        /// <summary>An opponent has the ball within dist of this player.</summary>
+        bool OpponentCarrierNear(float dist)
+        {
+            if (ball == null || ball.Owner == null || ball.Owner.teamIndex == teamIndex) return false;
+            Vector3 d = ball.Body.position - transform.position;
+            d.y = 0f;
+            return d.magnitude < dist;
         }
 
         /// <summary>Called when the user takes over another player.</summary>
@@ -213,41 +305,79 @@ namespace NFWL
 
         void Move(float dt)
         {
-            Vector3 dir = InputWorldDirection();
-            Vector3 horizontal = new Vector3(velocity.x, 0f, velocity.z);
-
-            if (dir != Vector3.zero)
+            // In the Editor, pick up tuning edits made in the Inspector during Play.
+            if (Application.isEditor && Time.frameCount % 60 == 0) ApplyAttributes();
+            if (keeper != null && keeper.OverrideMove(Time.time, out Vector3 diveV))
             {
-                Vector3 target = dir * CurrentMaxSpeed() * Mathf.Min(1f, moveInput.magnitude);
-                horizontal = Vector3.MoveTowards(horizontal, target, maxAcceleration * dt);
-                Quaternion want = Quaternion.LookRotation(dir, Vector3.up);
-                transform.rotation = Quaternion.RotateTowards(transform.rotation, want, rotationRate * dt);
+                // Diving / getting up: the body is launched, no running.
+                Vector3 b0 = transform.position;
+                controller.Move((diveV + Vector3.down * 2f) * dt);
+                if (dt > 0f) loco.SetActualVelocity((transform.position - b0) / dt);
+                intendedVelocity = diveV;
+                return;
             }
-            else
+            Vector3 dir = InputWorldDirection();
+            LocomotionTuning lt = NFWLTuning.Current.locomotion;
+
+            LocoInput input = new LocoInput
             {
-                horizontal = Vector3.MoveTowards(horizontal, Vector3.zero, brakingDeceleration * dt);
-                // Idle players turn to watch the ball.
-                if (ball != null && horizontal.sqrMagnitude < 0.5f && !HasBall)
+                moveDir = dir,
+                moveAmount = Mathf.Min(1f, moveInput.magnitude),
+                sprint = Sprinting,
+                hasBall = HasBall,
+                speedScale = (charging && chargeType == KickType.Shoot ? 0.7f : 1f) // Full Spec 3.6.2
+                             * kick.SpeedScale(Time.time)
+                             * (tackle.Active ? 0.6f : 1f)
+            };
+
+            PlayerController carrier = ball != null ? ball.Owner : null;
+            if (tackle.Active)
+            {
+                input.faceDir = tackle.Direction;
+            }
+            else if (kick.Active && Time.time < kick.FollowEndTime)
+            {
+                // Square up to the target while striking (the body turns at its normal rate, no snap).
+                input.faceDir = kick.Direction;
+            }
+            else if (HasBall && dribble.Shielding && Match != null)
+            {
+                // Shielding: keep the body between the opponent and the ball (back to him).
+                PlayerController opp = Match.NearestOpponent(this, out _);
+                if (opp != null)
                 {
-                    Vector3 toBall = ball.transform.position - transform.position;
-                    toBall.y = 0f;
-                    if (toBall.sqrMagnitude > 0.25f)
-                    {
-                        transform.rotation = Quaternion.RotateTowards(transform.rotation,
-                            Quaternion.LookRotation(toBall.normalized, Vector3.up), rotationRate * 0.5f * dt);
-                    }
+                    Vector3 away = transform.position - opp.transform.position;
+                    away.y = 0f;
+                    if (away.sqrMagnitude > 0.01f) input.faceDir = away;
                 }
             }
-
-            velocity = horizontal;
-            Vector3 before = transform.position;
-            controller.Move((horizontal + Vector3.down * 2f) * dt);
-            // Use the real displacement, so bumping into someone slows you down.
-            if (dt > 0f)
+            else if (!HasBall && role != Role.GK && carrier != null && carrier.teamIndex != teamIndex && !Sprinting)
             {
-                Vector3 moved = (transform.position - before) / dt;
-                velocity = new Vector3(moved.x, 0f, moved.z);
+                // Defensive stance: face the ball carrier and shuffle instead of turning away.
+                Vector3 toCarrier = carrier.transform.position - transform.position;
+                toCarrier.y = 0f;
+                if (toCarrier.magnitude < lt.jockeyDistance)
+                {
+                    input.jockey = true;
+                    input.faceDir = toCarrier;
+                }
             }
+            else if (dir == Vector3.zero && !HasBall && ball != null && loco.Speed < 0.7f)
+            {
+                // Idle players turn to watch the ball.
+                Vector3 toBall = ball.transform.position - transform.position;
+                toBall.y = 0f;
+                if (toBall.sqrMagnitude > 0.25f) input.faceDir = toBall;
+            }
+
+            loco.Tick(input, dt);
+
+            intendedVelocity = loco.Velocity;
+            Vector3 before = transform.position;
+            controller.Move((loco.Velocity + Vector3.down * 2f) * dt);
+            // Use the real displacement, so bumping into someone slows you down.
+            if (dt > 0f) loco.SetActualVelocity((transform.position - before) / dt);
+            transform.rotation = Quaternion.Euler(0f, loco.FacingYaw, 0f);
 
             Vector3 p = transform.position;
             p.x = Mathf.Clamp(p.x, -PitchDims.HalfLength - 2.5f, PitchDims.HalfLength + 2.5f);
@@ -261,6 +391,14 @@ namespace NFWL
             }
         }
 
+        /// <summary>Player-to-player bumps (PHASE 5.3): the controller reports who we ran into.</summary>
+        void OnControllerColliderHit(ControllerColliderHit hit)
+        {
+            if (!(hit.collider is CharacterController)) return;
+            PlayerController other = hit.collider.GetComponent<PlayerController>();
+            if (other != null) PlayerContacts.Resolve(this, other, intendedVelocity, Time.time);
+        }
+
         // -------------------------------------------------------------------
         // Kicking
         // -------------------------------------------------------------------
@@ -269,33 +407,54 @@ namespace NFWL
         {
             charging = true;
             chargeType = type;
-            chargeStartTime = Time.time;
+            chargeVariant = KickVariant.Normal;
+            chargeStartTime = Time.unscaledTime;
         }
 
         void ReleaseCharge(KickType type)
         {
             if (!charging || chargeType != type) return;
-            float held = Time.time - chargeStartTime;
+            float held = Time.unscaledTime - chargeStartTime;
             charging = false;
 
             float power = Rules.HoldTimeToPower(held);
             bool tap = Rules.IsTap(held);
 
-            if (HasBall)
-            {
-                PerformKick(type, power, tap, null);
-            }
-            else
-            {
-                kickBuffered = true;
-                bufferedType = type;
-                bufferedPower = power;
-                bufferedTap = tap;
-                bufferedUntil = Time.time + inputBufferSeconds;
-            }
+            RequestKick(type, power, tap, null, chargeVariant);
         }
 
-        public float ChargeRatio => charging ? Rules.HoldTimeToPower(Time.time - chargeStartTime) : -1f;
+        /// <summary>
+        /// Kicks now if the ball is at the feet, otherwise waits (the player runs onto his dribble,
+        /// or the ball arrives) for a short time. The ball never leaves before a foot reaches it.
+        /// </summary>
+        void RequestKick(KickType type, float power, bool tap, Vector3? aim, KickVariant variant = KickVariant.Normal)
+        {
+            if (HasBall && BallInKickReach())
+            {
+                PerformKick(type, power, tap, aim, variant);
+                return;
+            }
+            if (!HasBall && TryFirstTime(type, power, tap, aim, variant)) return;
+            kickBuffered = true;
+            bufferedType = type;
+            bufferedVariant = variant;
+            bufferedPower = power;
+            bufferedTap = tap;
+            bufferedAim = aim;
+            bufferedUntil = Time.time + (HasBall ? 0.8f : inputBufferSeconds);
+        }
+
+        bool BallInKickReach()
+        {
+            if (ball == null) return false;
+            if (ball.HeldInHands && ball.Owner == this) return true; // keeper drop kick
+            Vector3 rel = ball.Body.position - transform.position;
+            float y = rel.y;
+            rel.y = 0f;
+            return rel.magnitude < 1.0f && Vector3.Dot(rel, loco.Facing) > -0.3f && y < 1.0f;
+        }
+
+        public float ChargeRatio => charging ? Rules.HoldTimeToPower(Time.unscaledTime - chargeStartTime) : -1f;
 
         public string ChargeLabel
         {
@@ -303,9 +462,16 @@ namespace NFWL
             {
                 switch (chargeType)
                 {
-                    case KickType.ShortPass: return "PASS";
-                    case KickType.LongPass: return "LONG PASS";
-                    default: return "SHOT";
+                    case KickType.ShortPass: return chargeVariant == KickVariant.Through ? "THROUGH PASS" : "PASS";
+                    case KickType.LongPass: return chargeVariant == KickVariant.LoftedThrough ? "LOFTED THROUGH" : "LONG PASS";
+                    default:
+                        switch (chargeVariant)
+                        {
+                            case KickVariant.Power: return "POWER SHOT";
+                            case KickVariant.Finesse: return "FINESSE SHOT";
+                            case KickVariant.LowDriven: return "LOW DRIVEN SHOT";
+                            default: return "SHOT";
+                        }
                 }
             }
         }
@@ -323,12 +489,12 @@ namespace NFWL
         public Vector3 OwnGoalCenter => new Vector3(-AttackSign * PitchDims.HalfLength, 0f, 0f);
 
         /// <summary>Pass assist: the team-mate closest to the aim line, within a cone.</summary>
-        PlayerController FindPassTarget(Vector3 dir, float maxAngle, float maxDist)
+        public PlayerController FindPassTarget(Vector3 dir, float maxAngle, float maxDist)
         {
             if (Match == null) return null;
             PlayerController best = null;
             float bestScore = float.MaxValue;
-            foreach (PlayerController mate in Match.Team(teamIndex))
+            foreach (PlayerController mate in Match.TeamList(teamIndex))
             {
                 if (mate == this) continue;
                 Vector3 to = mate.transform.position - transform.position;
@@ -343,80 +509,147 @@ namespace NFWL
             return best;
         }
 
-        /// <summary>Kicks the ball. aimOverride is used by the AI (direction on the ground).</summary>
-        void PerformKick(KickType type, float power, bool tap, Vector3? aimOverride)
+        /// <summary>
+        /// Starts a kick (PHASE 3): picks the foot and the form and runs the kick timeline.
+        /// The ball is struck later, in OnKickContact, when the foot (or head) reaches it.
+        /// aimOverride is used by the AI (direction on the ground).
+        /// contactAt &gt; 0 fits the timeline to a ball that is still arriving (first time / volley / header).
+        /// </summary>
+        void PerformKick(KickType type, float power, bool tap, Vector3? aimOverride, KickVariant variant = KickVariant.Normal,
+            bool firstTime = false, bool header = false, float contactAt = -1f)
         {
-            if (ball == null || !HasBall) return;
+            if (ball == null || kick.Active) return;
+            if (!HasBall && !firstTime) return;
 
-            Vector3 dir = aimOverride ?? KickDirection();
+            Vector3 inputDir = KickDirection();
+            Vector3 dir = aimOverride ?? inputDir;
             dir.y = 0f;
-            dir.Normalize();
-            float speed, elevationDeg, errorDeg;
+            if (type == KickType.Shoot)
+            {
+                Vector3 toGoal = AttackGoalCenter - transform.position;
+                toGoal.y = 0f;
+                if (aimOverride == null && Vector3.Dot(dir.normalized, toGoal.normalized) > 0.64f) dir = dir.normalized * 0.65f + toGoal.normalized * 0.35f;
+            }
+            dir = dir.sqrMagnitude > 0.0001f ? dir.normalized : loco.Facing;
 
-            switch (type)
+            // Foot: the preferred foot, unless the ball sits clearly on the other side of the body.
+            Vector3 right = new Vector3(dir.z, 0f, -dir.x);
+            Vector3 rel = ball.Body.position - transform.position;
+            float lx = Vector3.Dot(rel, right);
+            float pref = attributes.PreferredFoot == PreferredFoot.Left ? -1f : 1f;
+            float side = lx * pref < -0.12f ? -pref : pref;
+
+            float p = tap ? (type == KickType.Shoot ? 0.3f : 0.4f) : power;
+            KickController.Form form;
+            if (header)
+            {
+                form = new KickController.Form { header = true, power = p };
+            }
+            else switch (type)
             {
                 case KickType.ShortPass:
-                {
-                    float p = tap ? 0.4f : power;
-                    PlayerController mate = FindPassTarget(dir, 35f, 22f);
-                    if (mate != null)
-                    {
-                        Vector3 lead = mate.transform.position + mate.Velocity * 0.35f - transform.position;
-                        lead.y = 0f;
-                        dir = lead.normalized;
-                        if (tap || aimOverride != null) p = Mathf.InverseLerp(7f, 23f, lead.magnitude * 1.1f + 6f);
-                    }
-                    speed = Mathf.Lerp(7f, 23f, p);
-                    elevationDeg = 0f;
-                    errorDeg = Rules.AttrLerp(attributes.ShortPass, 6f, 1f);
+                    // Side-foot pass: short backswing, accuracy first.
+                    form = new KickController.Form { style = FootStyle.Inside, backswing = 0.16f + 0.14f * p, follow = 0.25f, followHeight = 0.08f, loft = 0.1f, power = p * 0.6f };
+                    if (variant == KickVariant.Through) form.backswing += 0.05f;
                     break;
-                }
                 case KickType.LongPass:
-                {
-                    float p = tap ? 0.5f : power;
-                    PlayerController mate = FindPassTarget(dir, 30f, 40f);
-                    if (mate != null)
-                    {
-                        Vector3 lead = mate.transform.position + mate.Velocity * 0.6f - transform.position;
-                        lead.y = 0f;
-                        dir = lead.normalized;
-                        if (tap || aimOverride != null) p = Mathf.InverseLerp(10f, 32f, lead.magnitude);
-                    }
-                    speed = Mathf.Lerp(14f, 28f, p);
-                    elevationDeg = Mathf.Lerp(25f, 38f, p);
-                    errorDeg = Rules.AttrLerp(attributes.LongPass, 8f, 2f);
+                    // Lofted: big backswing, body leans back, foot gets under the ball.
+                    form = new KickController.Form { style = FootStyle.Laces, backswing = 0.35f + 0.15f * p, follow = 0.45f, followHeight = 0.5f, loft = 0.9f, power = 0.5f + 0.5f * p };
                     break;
-                }
                 default:
-                {
-                    float p = tap ? 0.3f : power;
-                    speed = Mathf.Lerp(15f, 32f, p) * Rules.AttrLerp(attributes.ShotPower, 0.85f, 1.05f);
-                    elevationDeg = Mathf.Lerp(2f, 16f, p * p);
-                    Vector3 toGoal = AttackGoalCenter - transform.position;
-                    toGoal.y = 0f;
-                    toGoal.Normalize();
-                    if (aimOverride == null && Vector3.Dot(dir, toGoal) > Mathf.Cos(50f * Mathf.Deg2Rad))
+                    switch (variant)
                     {
-                        dir = (dir * 0.65f + toGoal * 0.35f).normalized;
+                        case KickVariant.Power:
+                            form = new KickController.Form { style = FootStyle.Laces, backswing = 0.5f + 0.25f * p, follow = 0.55f + 0.2f * p, followHeight = 0.45f + 0.25f * p, loft = 0.2f + 0.4f * p, power = Mathf.Min(1f, p + 0.25f) };
+                            break;
+                        case KickVariant.Finesse:
+                            // Inside of the foot wrapped round the ball, follow through across the body.
+                            form = new KickController.Form { style = FootStyle.Inside, backswing = 0.3f + 0.15f * p, follow = 0.45f, followHeight = 0.35f, loft = 0.35f, power = p * 0.8f };
+                            break;
+                        case KickVariant.LowDriven:
+                            form = new KickController.Form { style = FootStyle.Laces, backswing = 0.3f + 0.2f * p, follow = 0.3f, followHeight = 0.15f, loft = 0f, power = p };
+                            break;
+                        default:
+                            form = new KickController.Form { style = FootStyle.Laces, backswing = 0.3f + 0.25f * p, follow = 0.4f + 0.2f * p, followHeight = 0.3f + 0.25f * p, loft = p * p * 0.6f, power = p };
+                            break;
                     }
-                    errorDeg = Rules.AttrLerp(attributes.Finishing, 7f, 1.5f) * (0.4f + 0.6f * p);
                     break;
-                }
             }
 
-            if (Sprinting) errorDeg *= 1.3f;
+            if (!kick.Begin(ball, dir, side, form, Time.time, contactAt)) return;
+            strike = new KickRequest
+            {
+                type = type, variant = variant, power = power, tap = tap, aim = aimOverride,
+                inputDir = inputDir, side = side, firstTime = firstTime, header = header
+            };
+        }
 
-            float yawError = Random.Range(-errorDeg, errorDeg);
-            float pitchError = type == KickType.ShortPass ? 0f : Random.Range(-errorDeg, errorDeg) * 0.5f;
-            dir = Quaternion.AngleAxis(yawError, Vector3.up) * dir;
+        /// <summary>
+        /// First time kick / volley / header: if a loose ball (or a pass) will reach this player soon,
+        /// start the kick now so the foot or head meets it on arrival.
+        /// </summary>
+        bool TryFirstTime(KickType type, float power, bool tap, Vector3? aim, KickVariant variant)
+        {
+            if (ball == null || kick.Active || role == Role.GK) return false;
+            if (ball.Owner != null && ball.Owner != this) return false;
+            if (ball.HeldInHands) return false;
+            for (float t = 0.1f; t <= 0.7f; t += 0.03f)
+            {
+                Vector3 bp = ball.PredictPosition(t);
+                Vector3 me = transform.position + loco.Velocity * (t * 0.7f);
+                Vector3 d = bp - me;
+                d.y = 0f;
+                if (d.magnitude < 0.7f && bp.y < 2.3f)
+                {
+                    bool header = bp.y > 1.25f;
+                    if (!header && bp.y > 1.0f) return false; // chest height: control it instead
+                    PerformKick(type, power, tap, aim, variant, true, header, Time.time + t);
+                    return kick.Active;
+                }
+            }
+            return false;
+        }
 
-            float elev = Mathf.Max(0f, elevationDeg + pitchError) * Mathf.Deg2Rad;
-            Vector3 kickVelocity = dir * (speed * Mathf.Cos(elev)) + Vector3.up * (speed * Mathf.Sin(elev));
+        /// <summary>The kicking foot (or head) reaches the ball: now the ball leaves (PHASE 3.1 contact sync).</summary>
+        void OnKickContact()
+        {
+            if (ball == null) return;
+            if (!HasBall && !strike.firstTime) return; // lost the ball during the backswing: a fresh-air kick
+            if (strike.firstTime && ball.Owner != null && ball.Owner != this) return;
+            Vector3 rel = ball.Body.position - transform.position;
+            float y = rel.y;
+            rel.y = 0f;
+            if (role == Role.GK && ball.HeldInHands)
+            {
+                // Keeper: the ball was dropped from the hands onto the foot (drop kick).
+                ball.HeldInHands = false;
+            }
+            else if (rel.magnitude > (strike.firstTime ? 1.0f : 1.2f) || y > (strike.header ? 2.4f : 1.3f))
+            {
+                return; // the ball is not at the foot: no contact
+            }
+            KickResult res = KickPlanner.Plan(this, ball, strike);
+            ball.Kick(res.velocity, res.spin, this);
+            LastKickLabel = res.label;
+            LastKickTime = Time.time;
+            if (Match != null) Match.ShowKickLabel(this, res.label);
+            if (Match != null && strike.type == KickType.Shoot) Match.OnShot(this);
+            // The intended receiver moves to meet the ball (AI players; the user steers his own).
+            if (res.receiver != null && !res.receiver.UserControlled && res.receiveTime > 0f)
+                res.receiver.CallRun(res.receivePoint, Time.time + res.receiveTime + 0.4f);
+            if (HasBall) ReleaseBall(kickCooldown);
+            else noControlUntil = Time.time + kickCooldown;
+        }
 
-            transform.rotation = Quaternion.LookRotation(dir, Vector3.up);
-            ball.Kick(kickVelocity, this);
-            if (Model != null) Model.PlayKick();
-            ReleaseBall(kickCooldown);
+        /// <summary>Tests / tools: request a kick as if the key was pressed (aim = flat direction).</summary>
+        public void DebugKick(KickType type, float power, Vector3 aim, KickVariant variant = KickVariant.Normal)
+            => RequestKick(type, power, false, aim, variant);
+
+        /// <summary>Through ball: the AI runner goes to target until the given time.</summary>
+        public void CallRun(Vector3 target, float until)
+        {
+            runTarget = target;
+            runTargetUntil = until;
         }
 
         // -------------------------------------------------------------------
@@ -425,8 +658,10 @@ namespace NFWL
 
         void TakeBall()
         {
+            bool wasLoose = ball.Owner == null;
             if (ball.Owner != null && ball.Owner != this) ball.Owner.ReleaseBall(0.6f);
             HasBall = true;
+            dribble.OnGainPossession(wasLoose);
             ball.Owner = this;
             ball.LastTouchedBy = this;
             hadBallSince = Time.time;
@@ -439,7 +674,9 @@ namespace NFWL
         {
             HasBall = false;
             kickBuffered = false;
-            if (ball != null && ball.Owner == this) ball.Owner = null;
+            if (dribble != null && dribble.TouchPending && Model != null) Model.CancelFootAction();
+            dribble?.Cancel();
+            if (ball != null && ball.Owner == this) { ball.Owner = null; ball.HeldInHands = false; }
             noControlUntil = Time.time + cooldown;
         }
 
@@ -448,7 +685,11 @@ namespace NFWL
             controller.enabled = false;
             transform.SetPositionAndRotation(position, rotation);
             controller.enabled = true;
-            velocity = Vector3.zero;
+            loco.Reset(rotation * Vector3.forward);
+            kick.Cancel();
+            tackle.Cancel();
+            keeper?.Cancel();
+            if (Model != null) Model.CancelAllActions();
             charging = false;
             kickBuffered = false;
         }
@@ -457,6 +698,28 @@ namespace NFWL
         {
             if (ball == null) return;
             if (Match != null && Match.PlayersFrozen) return;
+
+            // Goalkeeper: reads the shot, dives and resolves the save at the moment the hands get there.
+            if (keeper != null)
+            {
+                keeper.FixedTick(ball, Time.time);
+                if (keeper.Busy(Time.time) && !HasBall) return;
+            }
+
+            // Tackle: the foot stabs at the ball and the result is decided at the contact moment.
+            if (tackle.Active)
+            {
+                tackle.TrackBall(ball, Time.time);
+                tackle.FixedTick(ball, Time.time);
+            }
+
+            // Kick timeline: aim the foot at the moving ball and strike it in the contact step.
+            if (kick.BeforeContact)
+            {
+                kick.TrackBall(ball, Time.time);
+                if (kick.ContactDue(Time.time)) OnKickContact();
+                if (HasBall || strike.firstTime) return; // no touches or traps while winding up
+            }
 
             if (Time.time < noControlUntil)
             {
@@ -475,80 +738,55 @@ namespace NFWL
                 PlayerController owner = ball.Owner;
                 if (owner != null)
                 {
-                    // Tackle: an opponent close to the ball can win it. Goalkeepers holding the ball are safe.
-                    if (owner.teamIndex != teamIndex && owner.role != Role.GK && dist2D < tackleRadius && ballPos.y < 0.8f)
-                    {
-                        float rate = Rules.AttrLerp(attributes.Tackling, 0.9f, 2.6f)
-                                     / Rules.AttrLerp(owner.attributes.BallControl, 0.8f, 1.4f);
-                        if (owner.Sprinting) rate *= 1.4f;
-                        if (Random.value < rate * Time.fixedDeltaTime) TakeBall();
-                    }
+                    // v0.6: no automatic steal. Opponents win the ball with a tackle action
+                    // (TackleController) that must actually reach it.
                 }
                 else
                 {
-                    Vector3 rel = ballVel - velocity;
+                    Vector3 rel = ballVel - loco.Velocity;
                     rel.y = 0f;
                     float trapLimit = maxTrapRelativeSpeed * Rules.AttrLerp(attributes.BallControl, 0.8f, 1.2f);
                     float maxHeight = role == Role.GK ? 2.3f : 0.8f;
-                    if (dist2D < controlRadius && ballPos.y < maxHeight)
+                    if (role != Role.GK && dist2D < 0.7f && ballPos.y >= 0.8f && ballPos.y <= 1.6f
+                        && rel.magnitude < trapLimit && Time.time > chestCooldownUntil && !kick.Active)
                     {
-                        if (rel.magnitude < trapLimit) TakeBall();
-                        else if (role == Role.GK) TrySave(ballPos, ballVel);
+                        // Chest control: cushion the ball and drop it to the feet.
+                        chestCooldownUntil = Time.time + 0.5f;
+                        Vector3 cushion = loco.Velocity * 0.7f + loco.Facing * 0.7f + Vector3.down * 1.5f;
+                        cushion *= Rules.AttrLerp(attributes.BallControl, 1.25f, 1f);
+                        ball.Touch(cushion, this);
+                        if (Model != null) Model.PlayChest();
+                        LastKickLabel = "CHEST CONTROL";
+                        LastKickTime = Time.time;
                     }
-                    else if (role == Role.GK && dist2D < 2.4f && ballPos.y < 2.4f)
+                    else if (dist2D < controlRadius && ballPos.y < maxHeight)
                     {
-                        TrySave(ballPos, ballVel);
+                        // A keeper only gathers balls he is not already saving (GoalkeeperController decides those).
+                        if (rel.magnitude < trapLimit) TakeBall();
                     }
                 }
             }
-            else if (dist2D > loseRadius || ball.Owner != this)
+            else if (dist2D > NFWLTuning.Current.dribble.loseDistance || ball.Owner != this)
             {
                 ReleaseBall(0f);
             }
 
             if (!HasBall) return;
 
-            if (role == Role.GK && !IsHuman)
+            if (role == Role.GK && !UserControlled)
             {
                 // Keeper holds the ball in his hands.
                 Vector3 hands = transform.position + transform.forward * 0.45f + Vector3.up * 1.1f;
+                ball.HeldInHands = true;
                 ball.Body.position = hands;
-                ball.Velocity = velocity;
+                ball.Velocity = loco.Velocity;
                 return;
             }
 
-            float touch = Sprinting ? sprintTouchDistance : normalTouchDistance;
-            Vector3 forward = transform.forward;
-            forward.y = 0f;
-            forward.Normalize();
-            Vector3 target = transform.position + forward * (BodyRadius + touch);
-            target.y = ballPos.y;
-
-            float gain = Rules.AttrLerp(attributes.BallControl, 6f, 12f);
-            Vector3 desired = velocity + (target - ballPos) * gain;
-            desired.y = ballVel.y;
-            ball.Velocity = desired;
-        }
-
-        /// <summary>Goalkeeper: a dive that may push a fast shot away.</summary>
-        void TrySave(Vector3 ballPos, Vector3 ballVel)
-        {
-            if (Time.time < saveCooldownUntil) return;
-            // Only shots heading towards our own goal.
-            if (Mathf.Sign(ballVel.x) != -AttackSign || Mathf.Abs(ballVel.x) < 4f) return;
-            saveCooldownUntil = Time.time + 0.8f;
-
-            float side = Vector3.Dot(ballPos - transform.position, transform.right);
-            if (Model != null) Model.PlayDive(side);
-
-            float chance = Rules.AttrLerp(attributes.Goalkeeping, 0.35f, 0.8f);
-            if (Random.value < chance)
-            {
-                Vector3 v = new Vector3(-ballVel.x * 0.35f, Mathf.Abs(ballVel.y) * 0.3f + 2.5f, ballVel.z * 0.4f + Random.Range(-4f, 4f));
-                ball.Kick(v, this);
-                noControlUntil = Time.time + 0.4f;
-                if (Match != null) Match.ShowEvent("SAVE!", 1.0f);
-            }
+            // Touch dribbling: the ball is only moved by foot contacts (plus a small line assist).
+            // While a kick waits for the ball, no new touch pushes it away.
+            if (!(kickBuffered && HasBall) && !kick.Active)
+                dribble.FixedTick(ball, InputWorldDirection(), Mathf.Min(1f, moveInput.magnitude), Sprinting, Time.time);
         }
 
         // -------------------------------------------------------------------
@@ -574,20 +812,122 @@ namespace NFWL
 
         void ThinkAI()
         {
-            if (ball == null || Match == null) { moveInput = Vector2.zero; return; }
+            if (ball == null || Match == null || Match.AIPaused) { moveInput = Vector2.zero; Sprinting = false; return; }
             Vector3 ballP = ball.transform.position;
 
             if (role == Role.GK) { ThinkKeeper(ballP); return; }
             if (HasBall) { ThinkWithBall(); return; }
 
-            bool teamHasBall = ball.Owner != null && ball.Owner.teamIndex == teamIndex;
-            if (!teamHasBall && Match.ChaserFor(teamIndex) == this)
+            if (Time.time < runTargetUntil && ball.Owner == null)
             {
-                Vector3 target = ballP + ball.Velocity * 0.25f;
-                MoveTowards(target, true);
+                // Called onto a pass / through ball: run to where it will be (and hit it first time if it is on).
+                if (AIFirstTime()) return;
+                MoveTowards(runTarget, true);
                 return;
             }
-            MoveTowards(FormationTarget(ballP, teamHasBall), false);
+
+            // PHASE 8: the team AI gives every player a role and a spot.
+            TeamAI teamAI = Match.TeamAIFor(teamIndex);
+            TeamAI.Slot slot = teamAI != null ? teamAI.SlotOf(this) : null;
+            if (slot == null || slot.role == AIRole.None)
+            {
+                bool teamHasBall = ball.Owner != null && ball.Owner.teamIndex == teamIndex;
+                MoveTowards(FormationTarget(ballP, teamHasBall), false);
+                return;
+            }
+            AIRole = slot.role;
+
+            if (ball.Owner == null && AIFirstTime()) return;
+
+            PlayerController carrier = ball.Owner;
+            if (carrier != null && carrier.teamIndex != teamIndex && carrier.Kick.BeforeContact
+                && (slot.role == AIRole.Cover || slot.role == AIRole.Press))
+            {
+                // Shot / pass being wound up: step into the line to block it.
+                Vector3 line = (OwnGoalCenter - carrier.transform.position);
+                line.y = 0f;
+                Vector3 kickDir = carrier.Kick.Direction;
+                Vector3 dir = Vector3.Dot(kickDir, line.normalized) > 0.3f ? kickDir : line.normalized;
+                Vector3 blockAt = carrier.transform.position + dir * 1.6f;
+                if (Vector3.Distance(blockAt, transform.position) < 4f) { MoveTowards(blockAt, true); return; }
+            }
+
+            switch (slot.role)
+            {
+                case AIRole.Press:
+                    PressCarrier(slot);
+                    return;
+                default:
+                    MoveTowards(slot.target, slot.sprint);
+                    return;
+            }
+        }
+
+        /// <summary>The role the team AI gave this player (for the debug overlay).</summary>
+        public AIRole AIRole { get; private set; }
+        CarrierBrain brain;
+        public CarrierBrain Brain => brain;
+        float aiFirstTimeCheck;
+        float aiFirstTimeBall = -1f;
+        bool aiFirstTimeWanted;
+
+        /// <summary>First defender: close down goal-side, slow down to jockey, then pick a moment to tackle.</summary>
+        void PressCarrier(TeamAI.Slot slot)
+        {
+            PlayerController carrier = ball.Owner;
+            Vector3 ballP = ball.transform.position;
+            if (carrier == null || carrier.teamIndex == teamIndex)
+            {
+                MoveTowards(slot.target, true);
+                return;
+            }
+            Vector3 toGoal = OwnGoalCenter - ballP;
+            toGoal.y = 0f;
+            Vector3 toBall = ballP - transform.position;
+            toBall.y = 0f;
+            float d = toBall.magnitude;
+            Vector3 target = d < 4f ? ballP + toGoal.normalized * 0.7f : slot.target;
+            if (d < 1.2f && Time.time >= aiTackleCheck && tackle.Ready(Time.time))
+            {
+                aiTackleCheck = Time.time + 0.25f;
+                // Wait for the ball to leave the dribbler's foot: a heavy touch is the moment.
+                Vector3 exposed = ballP - carrier.transform.position;
+                exposed.y = 0f;
+                float chance = 0.15f + 0.6f * Mathf.Clamp01((exposed.magnitude - 0.35f) / 0.6f);
+                chance *= Rules.AttrLerp(attributes.Tackling, 0.8f, 1.2f);
+                if (carrier.Dribble.Shielding) chance *= 0.5f;
+                if (Random.value < chance) tackle.Begin(ball, Time.time);
+            }
+            // Sprint in from distance, then slow to a jockey (the stance turns on inside jockeyDistance).
+            MoveTowards(target, d > 4.5f);
+        }
+
+        /// <summary>
+        /// AI first-time finish / header: a team-mate's pass or cross arriving near goal is struck
+        /// without a touch when the player decides to (once per ball, Finishing-based).
+        /// </summary>
+        bool AIFirstTime()
+        {
+            if (ball.Owner != null || kick.Active || Time.time < aiFirstTimeCheck || Match.ResetPending) return false;
+            aiFirstTimeCheck = Time.time + 0.1f;
+            PlayerController last = ball.LastTouchedBy;
+            if (last == null || last == this || last.teamIndex != teamIndex) return false;
+            Vector3 toGoal = AttackGoalCenter - transform.position;
+            toGoal.y = 0f;
+            float gd = toGoal.magnitude;
+            if (gd > 17f || toGoal.x * AttackSign < 0f) return false;
+            if (ball.LastTouchTime != aiFirstTimeBall)
+            {
+                aiFirstTimeBall = ball.LastTouchTime;
+                float chance = Rules.AttrLerp(attributes.Finishing, 0.3f, 0.75f) * (gd < 11f ? 1f : 0.5f);
+                aiFirstTimeWanted = Random.value < chance;
+            }
+            if (!aiFirstTimeWanted) return false;
+            // Far post, away from the keeper.
+            float side = transform.position.z > 0f ? -1f : 1f;
+            Vector3 aim = AttackGoalCenter + new Vector3(0f, 0f, side * (PitchDims.GoalHalfWidth - 0.45f)) - transform.position;
+            float power = Mathf.Clamp01(0.55f + gd / 30f);
+            return TryFirstTime(KickType.Shoot, power, false, aim, KickVariant.Normal);
         }
 
         Vector3 FormationTarget(Vector3 ballP, bool teamHasBall)
@@ -614,8 +954,7 @@ namespace NFWL
                 {
                     PlayerController mate = Match.BestPassTarget(this);
                     Vector3 aim = mate != null ? mate.transform.position - transform.position : new Vector3(s, 0f, Random.Range(-0.5f, 0.5f));
-                    ball.Body.position = transform.position + transform.forward * 0.6f + Vector3.up * 0.2f;
-                    PerformKick(mate != null && aim.magnitude < 16f ? KickType.ShortPass : KickType.LongPass, 0.6f, false, aim);
+                    RequestKick(mate != null && aim.magnitude < 16f ? KickType.ShortPass : KickType.LongPass, 0.6f, false, aim);
                 }
                 return;
             }
@@ -627,59 +966,46 @@ namespace NFWL
                 MoveTowards(ballP, true); // come off the line for a loose ball in the box
                 return;
             }
-            float z = Mathf.Clamp(ballP.z * 0.35f, -1.2f, 1.2f);
-            float x = lineX + s * (0.7f + Mathf.Clamp01(1f - distToLine / 25f) * 0.8f);
-            MoveTowards(new Vector3(x, 0f, z), false);
+            // PHASE 6.1: stand on the angle bisector, off the line by distance, rush a 1 v 1.
+            Vector3 spot = keeper != null ? keeper.PositionTarget(ball) : new Vector3(lineX + s, 0f, Mathf.Clamp(ballP.z * 0.35f, -1.2f, 1.2f));
+            Vector3 toSpot = spot - transform.position;
+            toSpot.y = 0f;
+            MoveTowards(spot, toSpot.magnitude > 2.5f);
         }
 
+        /// <summary>PHASE 8.1: the carrier scores his options (CarrierBrain) and acts on the best.</summary>
         void ThinkWithBall()
         {
-            Vector3 pos = transform.position;
-            Vector3 toGoal = AttackGoalCenter - pos;
-            toGoal.y = 0f;
-            float goalDist = toGoal.magnitude;
-
-            PlayerController threat = Match.NearestOpponent(this, out float threatDist);
-
-            if (Time.time >= aiNextDecision)
+            if (brain == null) brain = new CarrierBrain(this);
+            AIRole = AIRole.Carrier;
+            float held = Time.time - hadBallSince;
+            if (Time.time >= aiNextDecision && !kick.Active && !kickBuffered)
             {
-                aiNextDecision = Time.time + 0.3f;
-                float held = Time.time - hadBallSince;
-
-                if (goalDist < 13f && Random.value < (goalDist < 8f ? 0.8f : 0.45f))
+                aiNextDecision = Time.time + 0.25f;
+                AIDecision d = brain.Decide(ball, Match, Match.TeamAIFor(teamIndex), held, Time.time);
+                switch (d.action)
                 {
-                    Vector3 aim = AttackGoalCenter + new Vector3(0f, 0f, Random.Range(-1.1f, 1.1f)) - pos;
-                    float power = Mathf.Clamp01(0.45f + goalDist / 30f + Random.Range(-0.1f, 0.15f));
-                    PerformKick(KickType.Shoot, power, false, aim);
-                    return;
-                }
-
-                bool pressured = threat != null && threatDist < 2.6f;
-                if ((pressured && Random.value < 0.55f) || (held > 2.5f && Random.value < 0.4f))
-                {
-                    PlayerController mate = Match.BestPassTarget(this);
-                    if (mate != null)
-                    {
-                        Vector3 to = mate.transform.position - pos;
-                        PerformKick(to.magnitude > 18f ? KickType.LongPass : KickType.ShortPass, 0.5f, false, to);
-                        return;
-                    }
+                    case AIAction.Shoot:
+                    case AIAction.Pass:
+                    case AIAction.ThroughPass:
+                    case AIAction.Clear:
+                        RequestKick(d.kickType, d.power, false, d.aim, d.variant);
+                        break;
                 }
             }
 
-            // Dribble towards goal, stepping around the nearest opponent.
-            Vector3 dir = toGoal.normalized;
-            if (threat != null && threatDist < 3.5f)
+            AIDecision c = brain.Current;
+            if (c.action == AIAction.Shield)
             {
-                Vector3 away = pos - threat.transform.position;
-                away.y = 0f;
-                Vector3 side = Vector3.Cross(Vector3.up, dir);
-                if (Vector3.Dot(side, away) < 0f) side = -side;
-                dir = (dir + side * 0.9f).normalized;
+                // Hold it: barely move, the dribble controller turns the body into a shield.
+                moveInput = new Vector2(c.aim.x, c.aim.z) * 0.2f;
+                Sprinting = false;
+                return;
             }
-            aiSprint = threat == null || threatDist > 4f;
+            Vector3 dir = brain.DribbleDir;
+            if (dir == Vector3.zero) dir = (AttackGoalCenter - transform.position).normalized;
             moveInput = new Vector2(dir.x, dir.z);
-            Sprinting = aiSprint;
+            Sprinting = c.action == AIAction.Dribble && c.sprint;
         }
     }
 }

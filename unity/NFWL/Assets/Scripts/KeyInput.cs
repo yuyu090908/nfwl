@@ -15,7 +15,10 @@ namespace NFWL
         static readonly HashSet<KeyCode> held = new HashSet<KeyCode>();
         static readonly HashSet<KeyCode> pressed = new HashSet<KeyCode>();
         static readonly HashSet<KeyCode> released = new HashSet<KeyCode>();
-        static bool shiftHeld;
+        static bool shiftHeld, altHeld, ctrlHeld;
+
+        /// <summary>Time.unscaledTime when Shift was last pressed (power shot vs. sprint, v0.6).</summary>
+        public static float ShiftDownTime { get; private set; } = -10f;
 
         /// <summary>Last key seen (for the HUD), so it is easy to tell whether input arrives at all.</summary>
         public static string LastKey { get; private set; } = "";
@@ -25,7 +28,10 @@ namespace NFWL
             if (e == null) return;
             if (e.isKey || e.type == EventType.KeyDown || e.type == EventType.KeyUp)
             {
+                if (e.shift && !shiftHeld) ShiftDownTime = Time.unscaledTime;
                 shiftHeld = e.shift;
+                altHeld = e.alt;
+                ctrlHeld = e.control;
             }
             if (e.keyCode == KeyCode.None) return;
 
@@ -52,14 +58,18 @@ namespace NFWL
         {
             foreach (KeyCode k in held) released.Add(k);
             held.Clear();
-            shiftHeld = false;
+            shiftHeld = altHeld = ctrlHeld = false;
         }
 
         public static bool Get(KeyCode k)
         {
             if (held.Contains(k)) return true;
             if ((k == KeyCode.LeftShift || k == KeyCode.RightShift) && shiftHeld) return true;
-            return Legacy(k, 0);
+            if ((k == KeyCode.LeftAlt || k == KeyCode.RightAlt) && altHeld) return true;
+            if ((k == KeyCode.LeftControl || k == KeyCode.RightControl) && ctrlHeld) return true;
+            bool legacy = Legacy(k, 0);
+            if (legacy && (k == KeyCode.LeftShift || k == KeyCode.RightShift) && Legacy(k, 1)) ShiftDownTime = Time.unscaledTime;
+            return legacy;
         }
 
         public static bool Down(KeyCode k) => pressed.Contains(k) || Legacy(k, 1);

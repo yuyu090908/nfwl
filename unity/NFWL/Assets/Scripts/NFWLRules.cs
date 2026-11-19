@@ -52,6 +52,10 @@ namespace NFWL
         [Range(40, 99)] public int Tackling = 70;
         [Range(40, 99)] public int Goalkeeping = 70;
 
+        [Header("v0.6 (defaults keep older data compatible)")]
+        public PreferredFoot PreferredFoot = PreferredFoot.Right;
+        [Range(1, 5)] public int WeakFootRating = 3;
+
         /// <summary>Overall rating shown on the player card (simple average of the key abilities).</summary>
         public int Overall(Role role)
         {
@@ -72,6 +76,8 @@ namespace NFWL
     }
 
     public enum Role { GK, DF, MF, FW }
+
+    public enum PreferredFoot { Left, Right }
 
     /// <summary>NFT rarity tiers (Master Doc 7.4).</summary>
     public enum Rarity { Common, Rare, Epic, Mythic, Legendary }

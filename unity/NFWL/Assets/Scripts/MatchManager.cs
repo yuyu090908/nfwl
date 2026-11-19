@@ -27,9 +27,9 @@ namespace NFWL
 
         public int HomeScore { get; private set; }
         public int AwayScore { get; private set; }
-        public bool PlayersFrozen => fullTime;
+        public bool PlayersFrozen => fullTime || (replay != null && replay.Playing);
 
-        public const string Version = "NFWL Unity v0.5  Crystalia";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 11";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -40,6 +40,9 @@ namespace NFWL
         Ball ball;
         readonly List<PlayerController> home = new List<PlayerController>();
         readonly List<PlayerController> away = new List<PlayerController>();
+        readonly List<PlayerController> all = new List<PlayerController>();
+        string kickLabel = "";
+        float kickLabelUntil;
         PlayerController human;
         Transform marker;
         Transform cameraAnchor;
@@ -68,6 +71,12 @@ namespace NFWL
         }
 
         public IEnumerable<PlayerController> Team(int teamIndex) => teamIndex == 0 ? home : away;
+        /// <summary>The team as a list (no enumerator allocation; read only).</summary>
+        public List<PlayerController> TeamList(int teamIndex) => teamIndex == 0 ? home : away;
+
+        readonly TeamAI[] teamAI = new TeamAI[2];
+        /// <summary>Team-level AI (PHASE 8): roles and target spots for each AI player.</summary>
+        public TeamAI TeamAIFor(int teamIndex) => teamAI[teamIndex];
 
         void Start()
         {
@@ -75,6 +84,10 @@ namespace NFWL
             ball = Ball.Create();
 
             SpawnTeams();
+            all.AddRange(home);
+            all.AddRange(away);
+            teamAI[0] = new TeamAI(this, 0, home, away);
+            teamAI[1] = new TeamAI(this, 1, away, home);
             foreach (PlayerController p in AllPlayers())
             {
                 p.Match = this;
@@ -93,8 +106,45 @@ namespace NFWL
             cameraAnchor = new GameObject("CameraAnchor").transform;
             EnsureLighting();
             EnsureCamera();
+            // v0.6 presentation: replay recorder, procedural sound.
+            matchCam = Camera.main != null ? Camera.main.GetComponent<MatchCamera>() : null;
+            if (matchCam != null) matchCam.Ball = ball;
+            replay = gameObject.AddComponent<ReplaySystem>();
+            replay.Init(ball, all, matchCam);
+            sfx = SoundFX.Create(transform);
+            ball.Impact += (kind, speed) => sfx.OnBallImpact(kind, speed, ball.transform.position);
             ResetKickoff();
         }
+
+        MatchCamera matchCam;
+        ReplaySystem replay;
+        SoundFX sfx;
+        bool replayQueued;
+        float replayQueuedAt;
+        string replayTitle;
+        float replayFrom, replayTo, replaySpeed, replayYaw, replayPitch, replayDist;
+        PlayerController replaySubject;
+        float lastSaveReplay = -100f;
+        float goalTime;
+
+        /// <summary>True between a goal / out and the restart.</summary>
+        public bool ResetPending => resetPending;
+        /// <summary>Optional player data (set before Start). Null = Resources/NFWLPlayers.json if any, else random.</summary>
+        public static IPlayerDataSource DataSource { get; set; }
+        public int Half => half;
+        public bool FullTime => fullTime;
+        public float Clock => clock;
+        public PlayerController Human => human;
+        public Ball MatchBall => ball;
+        /// <summary>F4 / tests: the user's player is also played by the AI (CPU vs CPU).</summary>
+        public bool AutoPlay { get; set; }
+        /// <summary>Tests: AI players stand still (physics, kicks, tackles and saves still run).</summary>
+        public bool AIPaused { get; set; }
+        /// <summary>Goal / save replays on or off (tests run without them).</summary>
+        public bool ReplaysEnabled { get; set; } = true;
+        public bool ShowAIDebug { get => showAIDebug; set => showAIDebug = value; }
+        public bool ShowPerf { get => showPerf; set => showPerf = value; }
+        public bool ReplayPlaying => replay != null && replay.Playing;
 
         IEnumerable<PlayerController> AllPlayers()
         {
@@ -138,6 +188,10 @@ namespace NFWL
             Element[] awayElements = { Element.Emerald, Element.Ice, Element.Ice, Element.Sapphire, Element.Ice };
             Rarity[] rarities = { Rarity.Rare, Rarity.Common, Rarity.Common, Rarity.Epic, Rarity.Mythic };
 
+            // PHASE 11: players from data (Resources/NFWLPlayers.json, e.g. NFT metadata) when present.
+            // The random generator below still runs in the same order, so slots without data are unchanged.
+            IPlayerDataSource source = DataSource ?? JsonPlayerSource.FromResources();
+
             for (int t = 0; t < 2; t++)
             {
                 Slot[] slots = t == 0 ? homeSlots : awaySlots;
@@ -147,12 +201,27 @@ namespace NFWL
                     int level = t == 0 ? 70 + (int)rarities[i] * 4 : awayLevel;
                     PlayerAttributes attrs = PlayerAttributes.Random(level, rnd);
                     if (s.role == Role.GK) attrs.Goalkeeping = Mathf.Clamp(level + 8, 40, 99);
+                    // v0.6: preferred foot and weak foot from a separate generator, so the abilities above
+                    // stay exactly as in v0.5. About one player in four is left-footed.
+                    var footRnd = new System.Random(5000 + t * 100 + s.number);
+                    attrs.PreferredFoot = footRnd.NextDouble() < 0.25 ? PreferredFoot.Left : PreferredFoot.Right;
+                    attrs.WeakFootRating = Mathf.Clamp(2 + footRnd.Next(0, 3) + (t == 0 && rarities[i] >= Rarity.Mythic ? 1 : 0), 1, 5);
                     // Kits from the design sheet: HOME black, AWAY white, keepers THIRD purple / teal.
                     KitStyle kit = s.role == Role.GK ? (t == 0 ? KitStyle.Third : KitStyle.AwayKeeper) : (t == 0 ? KitStyle.Home : KitStyle.Away);
-                    PlayerController p = PlayerController.Create(t, s.role, s.number, s.name,
-                        t == 0 ? rarities[i] : (Rarity)rnd.Next(0, 3), attrs, kit,
+                    Rarity rarity = t == 0 ? rarities[i] : (Rarity)rnd.Next(0, 3);
+                    string name = s.name;
+                    PlayerData data = null;
+                    if (source != null && source.TryGet(t, i, out data))
+                    {
+                        attrs = data.BuildAttributes(attrs);
+                        if (data.hasRarity) rarity = data.rarity;
+                        if (!string.IsNullOrEmpty(data.name)) name = data.name;
+                    }
+                    PlayerController p = PlayerController.Create(t, s.role, s.number, name,
+                        rarity, attrs, kit,
                         t == 0 ? homeElements[i] : awayElements[i], rnd.Next(0, 4),
                         0.97f + (float)rnd.NextDouble() * 0.08f);
+                    if (data != null) p.SetSkills(data.skills);
                     p.formationSpot = s.spot;
                     (t == 0 ? home : away).Add(p);
                 }
@@ -181,20 +250,20 @@ namespace NFWL
             PlayerController best = null;
             float bestD = float.MaxValue;
             Vector3 b = ball.transform.position;
-            foreach (PlayerController p in Team(teamIndex))
+            foreach (PlayerController p in TeamList(teamIndex))
             {
                 if (p.role == Role.GK) continue;
                 float d = (p.transform.position - b).sqrMagnitude;
                 if (d < bestD) { bestD = d; best = p; }
             }
-            return best != null && best.IsHuman ? null : best;
+            return best != null && best.UserControlled ? null : best;
         }
 
         public PlayerController NearestOpponent(PlayerController me, out float dist)
         {
             PlayerController best = null;
             float bestD = float.MaxValue;
-            foreach (PlayerController p in Team(1 - me.teamIndex))
+            foreach (PlayerController p in TeamList(1 - me.teamIndex))
             {
                 float d = Vector3.Distance(p.transform.position, me.transform.position);
                 if (d < bestD) { bestD = d; best = p; }
@@ -208,7 +277,7 @@ namespace NFWL
         {
             PlayerController best = null;
             float bestScore = float.MinValue;
-            foreach (PlayerController mate in Team(me.teamIndex))
+            foreach (PlayerController mate in TeamList(me.teamIndex))
             {
                 if (mate == me || mate.role == Role.GK) continue;
                 Vector3 to = mate.transform.position - me.transform.position;
@@ -281,11 +350,28 @@ namespace NFWL
 
         void Update()
         {
+            PerfStats.EndFrame();
+            if (KeyInput.Down(KeyCode.F2)) showPerf = !showPerf;
+            if (KeyInput.Down(KeyCode.F4)) AutoPlay = !AutoPlay;
+            if (replay != null && replay.Playing)
+            {
+                // Any action key skips the replay.
+                if (KeyInput.Down(KeyCode.Space) || KeyInput.Down(KeyCode.J) || KeyInput.Down(KeyCode.K) || KeyInput.Down(KeyCode.L)
+                    || KeyInput.Down(KeyCode.Return) || KeyInput.Down(KeyCode.R)) replay.Stop();
+                return;
+            }
+            if (KeyInput.Down(KeyCode.M) && sfx != null) sfx.ToggleMute();
+            if (replayQueued && Time.time >= replayQueuedAt)
+            {
+                replayQueued = false;
+                StartQueuedReplay();
+            }
             if (KeyInput.Down(KeyCode.R))
             {
                 if (fullTime) RestartMatch(); else ResetKickoff();
             }
             if (KeyInput.Down(KeyCode.Q) && !fullTime) SwitchToNearest();
+            if (KeyInput.Down(KeyCode.F1)) showAIDebug = !showAIDebug; // v0.6: AI role labels
             if (KeyInput.Down(KeyCode.Z) && Camera.main != null)
             {
                 // Z: zoom between close-up (see the characters) and wide (see the whole play).
@@ -297,6 +383,14 @@ namespace NFWL
             UpdateMarker();
 
             if (fullTime) return;
+            if (sfx != null) sfx.SetDanger(Danger());
+            if (teamAI[0] != null && !resetPending)
+            {
+                long t0 = PerfStats.Begin();
+                teamAI[0].Tick(ball, Time.time);
+                teamAI[1].Tick(ball, Time.time);
+                PerfStats.End(PerfStats.Slot.AI, t0);
+            }
 
             if (!resetPending)
             {
@@ -308,12 +402,14 @@ namespace NFWL
                     {
                         half = 2;
                         ShowEvent("HALF TIME", 2.5f);
+                        if (sfx != null) sfx.Whistle(true);
                         ScheduleReset(2.5f);
                     }
                     else
                     {
                         fullTime = true;
                         ShowEvent("FULL TIME", 9999f);
+                        if (sfx != null) sfx.Whistle(true);
                     }
                     return;
                 }
@@ -338,12 +434,139 @@ namespace NFWL
             KeyInput.EndFrame();
         }
 
+        void FixedUpdate()
+        {
+            // Ball against bodies (legs, torso, head) - v0.6 PHASE 4.4.
+            long t0 = PerfStats.Begin();
+            if (!fullTime) BallContacts.Step(ball, all, Time.fixedDeltaTime, Time.time);
+            PerfStats.End(PerfStats.Slot.Contacts, t0);
+        }
+
+        /// <summary>All ten players (read only use).</summary>
+        public List<PlayerController> AllPlayersList => all;
+
+        /// <summary>Shows the name of a kick (FINESSE SHOT, THROUGH PASS...) for a moment.</summary>
+        public void ShowKickLabel(PlayerController kicker, string label)
+        {
+            kickLabel = (kicker.teamIndex == 0 ? homeShort : awayShort) + " #" + kicker.number + "  " + label;
+            kickLabelUntil = Time.time + 1.6f;
+        }
+
+        /// <summary>Two players bumped (shoulder challenge or collision).</summary>
+        public void OnPlayerContact(PlayerController a, PlayerController b, float impulse, bool shoulder)
+        {
+            if (shoulder && a.teamIndex != b.teamIndex && (a.HasBall || b.HasBall)) ShowKickLabel(a.HasBall ? b : a, "SHOULDER CHALLENGE");
+        }
+
+        /// <summary>A goalkeeper got his hands to a shot (GoalkeeperController, PHASE 6.2).</summary>
+        public void OnSave(PlayerController keeper, SaveType type, string result)
+        {
+            ShowEvent("SAVE!", 1.0f);
+            string how;
+            switch (type)
+            {
+                case SaveType.HighDive: how = "FINGERTIP SAVE"; break;
+                case SaveType.LowDive: how = "LOW DIVING SAVE"; break;
+                case SaveType.DiveLeft:
+                case SaveType.DiveRight: how = "DIVING SAVE"; break;
+                case SaveType.HighCatch: how = "HIGH CATCH"; break;
+                case SaveType.LowCatch: how = "LOW CATCH"; break;
+                case SaveType.Punch: how = "PUNCHED CLEAR"; break;
+                default: how = "SAVE"; break;
+            }
+            ShowKickLabel(keeper, $"{how} ({result})");
+            if (sfx != null) sfx.Ooh(keeper.transform.position);
+            // Save replay: only when the keeper holds a diving / high catch (play stops anyway), at most every 20 s.
+            bool spectacular = type == SaveType.DiveLeft || type == SaveType.DiveRight || type == SaveType.HighDive
+                               || type == SaveType.LowDive || type == SaveType.HighCatch;
+            if (result == "CATCH" && spectacular && Time.time - lastSaveReplay > 20f && !resetPending)
+            {
+                lastSaveReplay = Time.time;
+                float gx = -keeper.AttackSign * PitchDims.HalfLength;
+                QueueReplay("SAVE REPLAY", Time.time + 0.9f, Time.time - 1.6f, Time.time + 0.5f, 0.45f,
+                    Mathf.Sign(gx) * 90f, 16f, 7.5f, keeper);
+            }
+        }
+
+        /// <summary>A shot was struck (PlayerController): shot camera and crowd.</summary>
+        public void OnShot(PlayerController shooter)
+        {
+            if (matchCam != null) matchCam.ShotCam(shooter.AttackGoalCenter.x);
+            if (sfx != null) sfx.SetDanger(1f);
+        }
+
+        void QueueReplay(string title, float at, float from, float to, float speed, float yaw, float pitch, float dist, PlayerController subject)
+        {
+            if (!ReplaysEnabled) return;
+            replayQueued = true;
+            replayQueuedAt = at;
+            replayTitle = title;
+            replayFrom = from;
+            replayTo = to;
+            replaySpeed = speed;
+            replayYaw = yaw;
+            replayPitch = pitch;
+            replayDist = dist;
+            replaySubject = subject;
+        }
+
+        void StartQueuedReplay()
+        {
+            PlayerController subject = replaySubject;
+            Vector3 goal = new Vector3(Mathf.Sign(Mathf.Sin(replayYaw * Mathf.Deg2Rad)) * PitchDims.HalfLength, 0f, 0f);
+            replay.Play(replayTitle, replayFrom, Mathf.Min(replayTo, Time.time), replaySpeed, replayYaw, replayPitch, replayDist,
+                t =>
+                {
+                    Vector3 b = replay.BallAt(t);
+                    b.y = Mathf.Min(b.y, 1f);
+                    // Frame the ball with the goal (goal replay) or with the keeper (save replay).
+                    Vector3 other = subject != null ? subject.transform.position : goal;
+                    return Vector3.Lerp(b, other, 0.3f);
+                }, null);
+        }
+
+        /// <summary>The scorer runs off toward the corner; AI team-mates join him.</summary>
+        void Celebrate(PlayerController scorer)
+        {
+            float sx = Mathf.Sign(scorer.AttackSign);
+            float sz = scorer.transform.position.z >= 0f ? 1f : -1f;
+            Vector3 corner = new Vector3(sx * (PitchDims.HalfLength - 3f), 0f, sz * (PitchDims.HalfWidth - 3f));
+            float until = Time.time + goalResetDelay;
+            if (!scorer.UserControlled) scorer.CallRun(corner, until);
+            int k = 0;
+            foreach (PlayerController m in TeamList(scorer.teamIndex))
+            {
+                if (m == scorer || m.UserControlled || m.role == Role.GK) continue;
+                Vector3 offset = new Vector3(-sx * (1.5f + k), 0f, (k % 2 == 0 ? -1f : 1f) * 1.2f);
+                m.CallRun((scorer.UserControlled ? scorer.transform.position : corner) + offset, until);
+                k++;
+            }
+        }
+
+        /// <summary>How dangerous the play is right now (0..1): ball near a goal and moving at it.</summary>
+        float Danger()
+        {
+            Vector3 b = ball.transform.position;
+            float d = PitchDims.HalfLength - Mathf.Abs(b.x);
+            float near = Mathf.InverseLerp(16f, 4f, d) * Mathf.InverseLerp(10f, 3f, Mathf.Abs(b.z));
+            float toward = Mathf.Clamp01(ball.Velocity.x * Mathf.Sign(b.x) / 20f);
+            return Mathf.Clamp01(near * 0.7f + near * toward * 0.6f);
+        }
+
+        /// <summary>The ball hit a player's body (a block, a chest, a head).</summary>
+        public void OnBodyContact(PlayerController p, string part, float speed)
+        {
+            if (speed > 10f && p.teamIndex != (ball.LastTouchedBy != null ? ball.LastTouchedBy.teamIndex : -1))
+                ShowKickLabel(p, part == "Head" ? "HEAD BLOCK" : "BLOCK");
+        }
+
         void OnApplicationFocus(bool hasFocus)
         {
             if (!hasFocus) KeyInput.ReleaseAll();
         }
 
-        void SwitchToNearest()
+        /// <summary>Q: control the team-mate nearest the ball.</summary>
+        public void SwitchToNearest()
         {
             PlayerController best = null;
             float bestD = float.MaxValue;
@@ -393,8 +616,15 @@ namespace NFWL
             {
                 if (scorer.Model != null) scorer.Model.PlayCelebrate();
                 lastScorer = $"{scorer.displayName}  #{scorer.number}";
+                Celebrate(scorer);
             }
             else lastScorer = "";
+            if (sfx != null) { sfx.Goal(); sfx.Whistle(); }
+            // Goal replay: from behind and to the side of the goal, slowed down, after the first cheer.
+            goalTime = Time.time;
+            float gx = (homeScored ? 1f : -1f) * PitchDims.HalfLength;
+            QueueReplay("GOAL REPLAY", Time.time + 1.4f, goalTime - 4.2f, goalTime + 0.7f, 0.6f,
+                Mathf.Sign(gx) * 90f - Mathf.Sign(gx) * 38f, 20f, 10f, null);
             Debug.Log($"GOAL for {(homeScored ? "HOME" : "AWAY")}. Score {HomeScore} - {AwayScore}");
             ScheduleReset(goalResetDelay);
             kickoffTeam = homeScored ? 1 : 0;
@@ -404,6 +634,9 @@ namespace NFWL
         {
             // Restart from the centre for now. Kick-ins, corners and goal kicks come next (Full Spec 3.3).
             ShowEvent("OUT", outResetDelay);
+            // Just wide of a post: the crowd reacts.
+            Vector3 bp = ball.transform.position;
+            if (sfx != null && Mathf.Abs(bp.x) > PitchDims.HalfLength && Mathf.Abs(bp.z) < PitchDims.GoalHalfWidth + 3f) sfx.Ooh(bp);
             ScheduleReset(outResetDelay);
             PlayerController last = ball.LastTouchedBy;
             if (last != null) kickoffTeam = 1 - last.teamIndex;
@@ -450,6 +683,9 @@ namespace NFWL
                 p.ReleaseBall(0.2f);
             }
             if (kickoffTeam == 0) SetHuman(home[home.Count - 1]);
+            if (teamAI[0] != null) { teamAI[0].Reset(); teamAI[1].Reset(); }
+            if (sfx != null) sfx.Whistle();
+            replayQueued = false;
             resetPending = false;
         }
 
@@ -513,12 +749,18 @@ namespace NFWL
             DrawScoreboard();
             // Version stamp, so it is easy to tell which build is running.
             Label(new Rect(Screen.width - 260f, 14f, 244f, 20f), Version, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 1f, 1f, 0.6f), false);
-            DrawEvent();
+            DrawMotionDebug();
+            if (showAIDebug) DrawAIDebug();
+            if (ReplayPlaying) DrawReplayBadge(); else DrawEvent();
+            if (showPerf) DrawPerf();
+            if (AutoPlay) Label(new Rect(16f, Screen.height - 150f, 300f, 20f), "AUTO PLAY (CPU vs CPU)  F4: off", smallStyle, Gold, false);
             DrawPlayerCard();
             DrawPowerGauge();
+            if (Time.time < kickLabelUntil)
+                Label(new Rect(0f, Screen.height - 128f, Screen.width, 24f), kickLabel, bigStyle.WithSize(18), Gold);
 
             Label(new Rect(16f, Screen.height - 26f, Screen.width - 32f, 22f),
-                "WASD: move   Shift: sprint   J: pass   L: long pass   K: shoot (hold = power)   Q: switch player   Z: zoom   R: reset",
+                "WASD: move   Shift: sprint   J: pass (Alt+J through) / tackle   L: long (Alt+L lofted through)   K: shoot (Shift+K power, Alt+K finesse, Ctrl+K low)   Q: switch   Z: zoom   R: reset   M: sound   F1: AI roles",
                 smallStyle, new Color(1f, 1f, 1f, 0.85f));
             if (string.IsNullOrEmpty(KeyInput.LastKey))
             {
@@ -616,6 +858,8 @@ namespace NFWL
             Label(new Rect(x + 78f, y + 34f, w - 84f, 18f), $"#{human.number}  CRYSTALIA / {human.element.name}", smallStyle, new Color(1f, 1f, 1f, 0.7f), false);
             Box(new Rect(x + 78f, y + 54f, 86f, 16f), rc);
             Label(new Rect(x + 78f, y + 54f, 86f, 16f), human.rarity.ToString().ToUpper(), tagStyle, new Color(0.05f, 0.07f, 0.15f), false);
+            // v0.6: preferred foot and weak-foot stars.
+            Label(new Rect(x + 168f, y + 54f, 60f, 16f), $"{(a.PreferredFoot == PreferredFoot.Left ? "L" : "R")}  WF{a.WeakFootRating}", tagStyle, new Color(1f, 1f, 1f, 0.75f), false);
 
             string[] names = { "SPD", "DRI", "PAS", "SHO" };
             int[] vals =
@@ -636,6 +880,81 @@ namespace NFWL
             }
         }
 
+        /// <summary>Small readout of the controlled player's movement (v0.6), to check the new motion.</summary>
+        void DrawMotionDebug()
+        {
+            if (human == null) return;
+            PlayerLocomotion lc = human.Locomotion;
+            float slipCm = human.Model != null ? human.Model.FootReachError * 100f : 0f;
+            string text = $"{lc.State}  {lc.Speed:0.0} m/s  lean {lc.LeanPitch:0}/{lc.LeanRoll:0}  bal {lc.Balance:0.00}  foot {slipCm:0.0}cm";
+            if (human.Tackle.Active || Time.time - human.Tackle.ContactTime < 1f)
+                text = $"TACKLE {(human.Tackle.Active && Time.time < human.Tackle.ContactTime ? "..." : human.Tackle.LastResult)}   " + text;
+            else if (human.Kick.Active) text = $"KICK {human.Kick.Phase}   " + text;
+            else if (human.HasBall) text = $"TOUCH {human.Dribble.LastKind}{(human.Dribble.Shielding ? " (SHIELD)" : "")}   " + text;
+            Label(new Rect(Screen.width - 420f, 34f, 404f, 20f), text, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(0.6f, 1f, 0.8f, 0.8f), false);
+
+            // Keepers: last save decision (type, reachable or not, outcome) for a few seconds.
+            float row = 54f;
+            for (int i = 0; i < all.Count; i++)
+            {
+                GoalkeeperController gk = all[i].Keeper;
+                if (gk == null || Time.time - gk.LastResultTime > 3f) continue;
+                string gkText = $"GK {(all[i].teamIndex == 0 ? homeShort : awayShort)}  {gk.LastSave}  {(gk.LastPlanReachable ? "reachable" : "out of reach")}  {gk.LastResult}";
+                Label(new Rect(Screen.width - 420f, row, 404f, 20f), gkText, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 0.9f, 0.6f, 0.85f), false);
+                row += 18f;
+            }
+        }
+
+        /// <summary>Broadcast-style replay overlay: letterbox bars, REPLAY tag, how to skip.</summary>
+        void DrawReplayBadge()
+        {
+            float bar = Screen.height * 0.07f;
+            Box(new Rect(0f, 0f, Screen.width, bar), new Color(0f, 0f, 0f, 0.85f));
+            Box(new Rect(0f, Screen.height - bar, Screen.width, bar), new Color(0f, 0f, 0f, 0.85f));
+            bool blink = Mathf.Repeat(Time.unscaledTime, 1f) < 0.6f;
+            Box(new Rect(24f, bar + 14f, 210f, 34f), new Color(Gold.r, Gold.g, Gold.b, 0.9f));
+            Label(new Rect(24f, bar + 14f, 210f, 34f), (blink ? "● " : "   ") + replay.Title, smallStyle.WithAlign(TextAnchor.MiddleCenter), Navy, false);
+            Label(new Rect(0f, Screen.height - bar + 8f, Screen.width, 24f), "Space / J / K / L : skip", smallStyle.WithAlign(TextAnchor.MiddleCenter), new Color(1f, 1f, 1f, 0.7f), false);
+        }
+
+        bool showPerf;
+        string perfText = "";
+        float perfTextAt;
+
+        /// <summary>F2: measured performance (PHASE 12). Refreshed once a second.</summary>
+        void DrawPerf()
+        {
+            if (Time.unscaledTime >= perfTextAt)
+            {
+                perfTextAt = Time.unscaledTime + 1f;
+                perfText = string.Format("FPS {0:0}  (worst frame {1:0.0} ms)\nAI {2:0.00} ms  Anim/IK {3:0.00} ms  Contacts {4:0.00} ms\nGC/s {5}  Mono heap {6} MB  vSync {7}  target {8}",
+                    PerfStats.Fps, PerfStats.WorstFrameMs, PerfStats.Ms(PerfStats.Slot.AI), PerfStats.Ms(PerfStats.Slot.Animation),
+                    PerfStats.Ms(PerfStats.Slot.Contacts), PerfStats.GcPerSecond, PerfStats.MonoHeapMB, QualitySettings.vSyncCount, Application.targetFrameRate);
+            }
+            Box(new Rect(12f, 60f, 430f, 64f), new Color(0f, 0f, 0f, 0.6f));
+            Label(new Rect(20f, 64f, 420f, 60f), perfText, smallStyle, Color.white, false);
+        }
+
+        bool showAIDebug;
+        static readonly string[] roleShort = { "", "BALL", "GK", "INTERCEPT", "PRESS", "COVER", "MARK", "SUPPORT", "RUN", "WIDE", "REST" };
+
+        /// <summary>F1: each player's AI role above his head, and the carrier's chosen option.</summary>
+        void DrawAIDebug()
+        {
+            Camera cam = Camera.main;
+            if (cam == null) return;
+            for (int i = 0; i < all.Count; i++)
+            {
+                PlayerController p = all[i];
+                Vector3 sp = cam.WorldToScreenPoint(p.transform.position + Vector3.up * 2.3f);
+                if (sp.z <= 0f) continue;
+                string text = p.IsHuman ? "YOU" : p.role == Role.GK ? "GK" : roleShort[(int)p.AIRole];
+                if (p.HasBall && !p.IsHuman && p.Brain != null) text = p.Brain.Current.action.ToString().ToUpperInvariant();
+                Color c = p.teamIndex == 0 ? new Color(0.6f, 0.9f, 1f, 0.9f) : new Color(1f, 0.7f, 0.6f, 0.9f);
+                Label(new Rect(sp.x - 50f, Screen.height - sp.y - 10f, 100f, 20f), text, smallStyle.WithAlign(TextAnchor.MiddleCenter), c);
+            }
+        }
+
         void DrawPowerGauge()
         {
             if (human == null) return;
@@ -650,9 +969,23 @@ namespace NFWL
         }
     }
 
+    /// <summary>Derived GUI styles are cached (v0.6 PHASE 12: no new GUIStyle every OnGUI call).</summary>
     static class GUIStyleExt
     {
-        public static GUIStyle WithSize(this GUIStyle s, int size) => new GUIStyle(s) { fontSize = size };
-        public static GUIStyle WithAlign(this GUIStyle s, TextAnchor a) => new GUIStyle(s) { alignment = a };
+        static readonly Dictionary<(GUIStyle, int, int), GUIStyle> cache = new Dictionary<(GUIStyle, int, int), GUIStyle>();
+
+        public static GUIStyle WithSize(this GUIStyle s, int size) => Get(s, 0, size, () => new GUIStyle(s) { fontSize = size });
+        public static GUIStyle WithAlign(this GUIStyle s, TextAnchor a) => Get(s, 1, (int)a, () => new GUIStyle(s) { alignment = a });
+
+        static GUIStyle Get(GUIStyle s, int kind, int value, System.Func<GUIStyle> make)
+        {
+            var key = (s, kind, value);
+            if (!cache.TryGetValue(key, out GUIStyle g))
+            {
+                g = make();
+                cache[key] = g;
+            }
+            return g;
+        }
     }
 }
