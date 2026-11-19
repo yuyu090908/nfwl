@@ -29,7 +29,7 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime;
 
-        public const string Version = "NFWL Unity v0.6-dev  STEP 8";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 9";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -71,6 +71,12 @@ namespace NFWL
         }
 
         public IEnumerable<PlayerController> Team(int teamIndex) => teamIndex == 0 ? home : away;
+        /// <summary>The team as a list (no enumerator allocation; read only).</summary>
+        public List<PlayerController> TeamList(int teamIndex) => teamIndex == 0 ? home : away;
+
+        readonly TeamAI[] teamAI = new TeamAI[2];
+        /// <summary>Team-level AI (PHASE 8): roles and target spots for each AI player.</summary>
+        public TeamAI TeamAIFor(int teamIndex) => teamAI[teamIndex];
 
         void Start()
         {
@@ -80,6 +86,8 @@ namespace NFWL
             SpawnTeams();
             all.AddRange(home);
             all.AddRange(away);
+            teamAI[0] = new TeamAI(this, 0, home, away);
+            teamAI[1] = new TeamAI(this, 1, away, home);
             foreach (PlayerController p in AllPlayers())
             {
                 p.Match = this;
@@ -296,6 +304,7 @@ namespace NFWL
                 if (fullTime) RestartMatch(); else ResetKickoff();
             }
             if (KeyInput.Down(KeyCode.Q) && !fullTime) SwitchToNearest();
+            if (KeyInput.Down(KeyCode.F1)) showAIDebug = !showAIDebug; // v0.6: AI role labels
             if (KeyInput.Down(KeyCode.Z) && Camera.main != null)
             {
                 // Z: zoom between close-up (see the characters) and wide (see the whole play).
@@ -307,6 +316,11 @@ namespace NFWL
             UpdateMarker();
 
             if (fullTime) return;
+            if (teamAI[0] != null && !resetPending)
+            {
+                teamAI[0].Tick(ball, Time.time);
+                teamAI[1].Tick(ball, Time.time);
+            }
 
             if (!resetPending)
             {
@@ -508,6 +522,7 @@ namespace NFWL
                 p.ReleaseBall(0.2f);
             }
             if (kickoffTeam == 0) SetHuman(home[home.Count - 1]);
+            if (teamAI[0] != null) { teamAI[0].Reset(); teamAI[1].Reset(); }
             resetPending = false;
         }
 
@@ -572,6 +587,7 @@ namespace NFWL
             // Version stamp, so it is easy to tell which build is running.
             Label(new Rect(Screen.width - 260f, 14f, 244f, 20f), Version, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 1f, 1f, 0.6f), false);
             DrawMotionDebug();
+            if (showAIDebug) DrawAIDebug();
             DrawEvent();
             DrawPlayerCard();
             DrawPowerGauge();
@@ -721,6 +737,26 @@ namespace NFWL
                 string gkText = $"GK {(all[i].teamIndex == 0 ? homeShort : awayShort)}  {gk.LastSave}  {(gk.LastPlanReachable ? "reachable" : "out of reach")}  {gk.LastResult}";
                 Label(new Rect(Screen.width - 420f, row, 404f, 20f), gkText, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 0.9f, 0.6f, 0.85f), false);
                 row += 18f;
+            }
+        }
+
+        bool showAIDebug;
+        static readonly string[] roleShort = { "", "BALL", "GK", "INTERCEPT", "PRESS", "COVER", "MARK", "SUPPORT", "RUN", "WIDE", "REST" };
+
+        /// <summary>F1: each player's AI role above his head, and the carrier's chosen option.</summary>
+        void DrawAIDebug()
+        {
+            Camera cam = Camera.main;
+            if (cam == null) return;
+            for (int i = 0; i < all.Count; i++)
+            {
+                PlayerController p = all[i];
+                Vector3 sp = cam.WorldToScreenPoint(p.transform.position + Vector3.up * 2.3f);
+                if (sp.z <= 0f) continue;
+                string text = p.IsHuman ? "YOU" : p.role == Role.GK ? "GK" : roleShort[(int)p.AIRole];
+                if (p.HasBall && !p.IsHuman && p.Brain != null) text = p.Brain.Current.action.ToString().ToUpperInvariant();
+                Color c = p.teamIndex == 0 ? new Color(0.6f, 0.9f, 1f, 0.9f) : new Color(1f, 0.7f, 0.6f, 0.9f);
+                Label(new Rect(sp.x - 50f, Screen.height - sp.y - 10f, 100f, 20f), text, smallStyle.WithAlign(TextAnchor.MiddleCenter), c);
             }
         }
 

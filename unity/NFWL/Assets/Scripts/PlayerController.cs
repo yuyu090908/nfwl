@@ -120,7 +120,6 @@ namespace NFWL
         // AI state
         float aiNextDecision;
         float hadBallSince;
-        bool aiSprint;
 
         const float BodyRadius = 0.3f;
         const float BodyHeight = 1.8f;
@@ -799,37 +798,114 @@ namespace NFWL
 
             if (Time.time < runTargetUntil && ball.Owner == null)
             {
-                // Called onto a through ball: sprint to where it will be.
+                // Called onto a pass / through ball: run to where it will be (and hit it first time if it is on).
+                if (AIFirstTime()) return;
                 MoveTowards(runTarget, true);
                 return;
             }
-            bool teamHasBall = ball.Owner != null && ball.Owner.teamIndex == teamIndex;
-            if (!teamHasBall && Match.ChaserFor(teamIndex) == this)
+
+            // PHASE 8: the team AI gives every player a role and a spot.
+            TeamAI teamAI = Match.TeamAIFor(teamIndex);
+            TeamAI.Slot slot = teamAI != null ? teamAI.SlotOf(this) : null;
+            if (slot == null || slot.role == AIRole.None)
             {
-                PlayerController carrier = ball.Owner;
-                Vector3 target = ballP + ball.Velocity * 0.25f;
-                if (carrier != null)
-                {
-                    // Close down goal-side of the ball, then pick a moment to tackle.
-                    Vector3 toGoal = OwnGoalCenter - ballP;
-                    toGoal.y = 0f;
-                    Vector3 toBall = ballP - transform.position;
-                    toBall.y = 0f;
-                    float d = toBall.magnitude;
-                    if (d < 4f) target = ballP + toGoal.normalized * 0.7f;
-                    if (d < 1.2f && Time.time >= aiTackleCheck && tackle.Ready(Time.time))
-                    {
-                        aiTackleCheck = Time.time + 0.25f;
-                        Vector3 exposed = ballP - carrier.transform.position;
-                        exposed.y = 0f;
-                        float chance = 0.25f + 0.5f * Mathf.Clamp01((exposed.magnitude - 0.35f) / 0.6f);
-                        if (Random.value < chance) tackle.Begin(ball, Time.time);
-                    }
-                }
-                MoveTowards(target, true);
+                bool teamHasBall = ball.Owner != null && ball.Owner.teamIndex == teamIndex;
+                MoveTowards(FormationTarget(ballP, teamHasBall), false);
                 return;
             }
-            MoveTowards(FormationTarget(ballP, teamHasBall), false);
+            AIRole = slot.role;
+
+            if (ball.Owner == null && AIFirstTime()) return;
+
+            PlayerController carrier = ball.Owner;
+            if (carrier != null && carrier.teamIndex != teamIndex && carrier.Kick.BeforeContact
+                && (slot.role == AIRole.Cover || slot.role == AIRole.Press))
+            {
+                // Shot / pass being wound up: step into the line to block it.
+                Vector3 line = (OwnGoalCenter - carrier.transform.position);
+                line.y = 0f;
+                Vector3 kickDir = carrier.Kick.Direction;
+                Vector3 dir = Vector3.Dot(kickDir, line.normalized) > 0.3f ? kickDir : line.normalized;
+                Vector3 blockAt = carrier.transform.position + dir * 1.6f;
+                if (Vector3.Distance(blockAt, transform.position) < 4f) { MoveTowards(blockAt, true); return; }
+            }
+
+            switch (slot.role)
+            {
+                case AIRole.Press:
+                    PressCarrier(slot);
+                    return;
+                default:
+                    MoveTowards(slot.target, slot.sprint);
+                    return;
+            }
+        }
+
+        /// <summary>The role the team AI gave this player (for the debug overlay).</summary>
+        public AIRole AIRole { get; private set; }
+        CarrierBrain brain;
+        public CarrierBrain Brain => brain;
+        float aiFirstTimeCheck;
+        float aiFirstTimeBall = -1f;
+        bool aiFirstTimeWanted;
+
+        /// <summary>First defender: close down goal-side, slow down to jockey, then pick a moment to tackle.</summary>
+        void PressCarrier(TeamAI.Slot slot)
+        {
+            PlayerController carrier = ball.Owner;
+            Vector3 ballP = ball.transform.position;
+            if (carrier == null || carrier.teamIndex == teamIndex)
+            {
+                MoveTowards(slot.target, true);
+                return;
+            }
+            Vector3 toGoal = OwnGoalCenter - ballP;
+            toGoal.y = 0f;
+            Vector3 toBall = ballP - transform.position;
+            toBall.y = 0f;
+            float d = toBall.magnitude;
+            Vector3 target = d < 4f ? ballP + toGoal.normalized * 0.7f : slot.target;
+            if (d < 1.2f && Time.time >= aiTackleCheck && tackle.Ready(Time.time))
+            {
+                aiTackleCheck = Time.time + 0.25f;
+                // Wait for the ball to leave the dribbler's foot: a heavy touch is the moment.
+                Vector3 exposed = ballP - carrier.transform.position;
+                exposed.y = 0f;
+                float chance = 0.15f + 0.6f * Mathf.Clamp01((exposed.magnitude - 0.35f) / 0.6f);
+                chance *= Rules.AttrLerp(attributes.Tackling, 0.8f, 1.2f);
+                if (carrier.Dribble.Shielding) chance *= 0.5f;
+                if (Random.value < chance) tackle.Begin(ball, Time.time);
+            }
+            // Sprint in from distance, then slow to a jockey (the stance turns on inside jockeyDistance).
+            MoveTowards(target, d > 4.5f);
+        }
+
+        /// <summary>
+        /// AI first-time finish / header: a team-mate's pass or cross arriving near goal is struck
+        /// without a touch when the player decides to (once per ball, Finishing-based).
+        /// </summary>
+        bool AIFirstTime()
+        {
+            if (ball.Owner != null || kick.Active || Time.time < aiFirstTimeCheck) return false;
+            aiFirstTimeCheck = Time.time + 0.1f;
+            PlayerController last = ball.LastTouchedBy;
+            if (last == null || last == this || last.teamIndex != teamIndex) return false;
+            Vector3 toGoal = AttackGoalCenter - transform.position;
+            toGoal.y = 0f;
+            float gd = toGoal.magnitude;
+            if (gd > 17f || toGoal.x * AttackSign < 0f) return false;
+            if (ball.LastTouchTime != aiFirstTimeBall)
+            {
+                aiFirstTimeBall = ball.LastTouchTime;
+                float chance = Rules.AttrLerp(attributes.Finishing, 0.3f, 0.75f) * (gd < 11f ? 1f : 0.5f);
+                aiFirstTimeWanted = Random.value < chance;
+            }
+            if (!aiFirstTimeWanted) return false;
+            // Far post, away from the keeper.
+            float side = transform.position.z > 0f ? -1f : 1f;
+            Vector3 aim = AttackGoalCenter + new Vector3(0f, 0f, side * (PitchDims.GoalHalfWidth - 0.45f)) - transform.position;
+            float power = Mathf.Clamp01(0.55f + gd / 30f);
+            return TryFirstTime(KickType.Shoot, power, false, aim, KickVariant.Normal);
         }
 
         Vector3 FormationTarget(Vector3 ballP, bool teamHasBall)
@@ -875,54 +951,39 @@ namespace NFWL
             MoveTowards(spot, toSpot.magnitude > 2.5f);
         }
 
+        /// <summary>PHASE 8.1: the carrier scores his options (CarrierBrain) and acts on the best.</summary>
         void ThinkWithBall()
         {
-            Vector3 pos = transform.position;
-            Vector3 toGoal = AttackGoalCenter - pos;
-            toGoal.y = 0f;
-            float goalDist = toGoal.magnitude;
-
-            PlayerController threat = Match.NearestOpponent(this, out float threatDist);
-
-            if (Time.time >= aiNextDecision)
+            if (brain == null) brain = new CarrierBrain(this);
+            AIRole = AIRole.Carrier;
+            float held = Time.time - hadBallSince;
+            if (Time.time >= aiNextDecision && !kick.Active && !kickBuffered)
             {
-                aiNextDecision = Time.time + 0.3f;
-                float held = Time.time - hadBallSince;
-
-                if (goalDist < 13f && Random.value < (goalDist < 8f ? 0.8f : 0.45f))
+                aiNextDecision = Time.time + 0.25f;
+                AIDecision d = brain.Decide(ball, Match, Match.TeamAIFor(teamIndex), held, Time.time);
+                switch (d.action)
                 {
-                    Vector3 aim = AttackGoalCenter + new Vector3(0f, 0f, Random.Range(-1.1f, 1.1f)) - pos;
-                    float power = Mathf.Clamp01(0.45f + goalDist / 30f + Random.Range(-0.1f, 0.15f));
-                    RequestKick(KickType.Shoot, power, false, aim);
-                    return;
-                }
-
-                bool pressured = threat != null && threatDist < 2.6f;
-                if ((pressured && Random.value < 0.55f) || (held > 2.5f && Random.value < 0.4f))
-                {
-                    PlayerController mate = Match.BestPassTarget(this);
-                    if (mate != null)
-                    {
-                        Vector3 to = mate.transform.position - pos;
-                        RequestKick(to.magnitude > 18f ? KickType.LongPass : KickType.ShortPass, 0.5f, false, to);
-                        return;
-                    }
+                    case AIAction.Shoot:
+                    case AIAction.Pass:
+                    case AIAction.ThroughPass:
+                    case AIAction.Clear:
+                        RequestKick(d.kickType, d.power, false, d.aim, d.variant);
+                        break;
                 }
             }
 
-            // Dribble towards goal, stepping around the nearest opponent.
-            Vector3 dir = toGoal.normalized;
-            if (threat != null && threatDist < 3.5f)
+            AIDecision c = brain.Current;
+            if (c.action == AIAction.Shield)
             {
-                Vector3 away = pos - threat.transform.position;
-                away.y = 0f;
-                Vector3 side = Vector3.Cross(Vector3.up, dir);
-                if (Vector3.Dot(side, away) < 0f) side = -side;
-                dir = (dir + side * 0.9f).normalized;
+                // Hold it: barely move, the dribble controller turns the body into a shield.
+                moveInput = new Vector2(c.aim.x, c.aim.z) * 0.2f;
+                Sprinting = false;
+                return;
             }
-            aiSprint = threat == null || threatDist > 4f;
+            Vector3 dir = brain.DribbleDir;
+            if (dir == Vector3.zero) dir = (AttackGoalCenter - transform.position).normalized;
             moveInput = new Vector2(dir.x, dir.z);
-            Sprinting = aiSprint;
+            Sprinting = c.action == AIAction.Dribble && c.sprint;
         }
     }
 }
