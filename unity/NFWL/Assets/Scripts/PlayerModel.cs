@@ -424,11 +424,28 @@ namespace NFWL
 
         /// <summary>Hip turn, lean and arm balance during a kick (0 when no kick runs).</summary>
         void KickBody(float now, out float weight, out float pelvisYaw, out float torsoPitch, out float torsoRoll,
-            out Vector3 armLEuler, out Vector3 armREuler)
+            out Vector3 armLEuler, out Vector3 armREuler, out float lift)
         {
-            weight = 0f; pelvisYaw = 0f; torsoPitch = 0f; torsoRoll = 0f;
+            weight = 0f; pelvisYaw = 0f; torsoPitch = 0f; torsoRoll = 0f; lift = 0f;
             armLEuler = armREuler = Vector3.zero;
             if (kick == null || !kick.Active) return;
+            if (kickForm.header)
+            {
+                // Header: rise to the ball, neck back, then snap the forehead through it.
+                float hIn = Mathf.InverseLerp(kick.StartTime, kick.BackswingTime, now);
+                float hOut = 1f - Mathf.InverseLerp(kick.FollowEndTime, kick.RecoverEndTime, now);
+                weight = Mathf.Clamp01(Mathf.Min(hIn * 1.5f, hOut));
+                float snap = Mathf.InverseLerp(kick.BackswingTime, kick.ContactTime, now);
+                torsoPitch = Mathf.Lerp(-22f, 26f, snap * snap) * weight;
+                float jump = Mathf.Clamp(kick.BallAtContact.y - 1.65f * heightScale, 0f, 0.6f);
+                // Jump arc peaking at contact.
+                float tUp = Mathf.InverseLerp(kick.StartTime, kick.ContactTime, now);
+                float tDown = Mathf.InverseLerp(kick.ContactTime, kick.FollowEndTime + 0.1f, now);
+                lift = jump * (now < kick.ContactTime ? Mathf.Sin(tUp * Mathf.PI * 0.5f) : 1f - tDown * tDown);
+                armLEuler = new Vector3(-40f, 0f, -55f);
+                armREuler = new Vector3(-40f, 0f, 55f);
+                return;
+            }
             float side = kick.Side;
             float wIn = Mathf.InverseLerp(kick.StartTime, kick.PlantTime, now);
             float wOut = 1f - Mathf.InverseLerp(kick.FollowEndTime, kick.RecoverEndTime, now);
@@ -454,6 +471,10 @@ namespace NFWL
         public void PlayDive(float side) { diveTimer = 0f; diveSide = Mathf.Sign(side == 0f ? 1f : side); }
 
         public void PlayCelebrate() { celebrateTimer = 0f; }
+
+        float chestTimer = -1f;
+        /// <summary>Chest control: lean back and cushion the ball.</summary>
+        public void PlayChest() { chestTimer = 0f; }
 
         /// <summary>Animation runs after all movement this frame, so planted feet stay exactly in place.</summary>
         void LateUpdate()
@@ -521,7 +542,20 @@ namespace NFWL
             ApplyFootAction(now);
             ApplyPlantFoot(now);
             KickBody(now, out float kickW, out float kickPelvisYaw, out float kickTorsoPitch, out float kickTorsoRoll,
-                out Vector3 kickArmL, out Vector3 kickArmR);
+                out Vector3 kickArmL, out Vector3 kickArmR, out float kickLift);
+            if (kickLift > 0.001f)
+            {
+                bodyPos.y += kickLift;
+                body.localPosition = bodyPos;
+                if (kickLift > 0.08f) airborne = true;
+            }
+            float chestLean = 0f;
+            if (chestTimer >= 0f)
+            {
+                chestTimer += dt;
+                if (chestTimer > 0.45f) chestTimer = -1f;
+                else chestLean = -28f * Mathf.Sin(chestTimer / 0.45f * Mathf.PI);
+            }
             float run = gait.RunAmount;
 
             // IK weights: feet follow the ground unless the body is in the air or a kick drives the leg.
@@ -549,7 +583,7 @@ namespace NFWL
 
             // ---------- upper body ----------
             lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 14f : 0f), 1f - Mathf.Exp(-14f * dt));
-            torso.localRotation = Quaternion.Euler(lean + kickTorsoPitch, -pelvisYaw * (1.6f - kickW * 1.2f), -pelvisRoll + kickTorsoRoll);
+            torso.localRotation = Quaternion.Euler(lean + kickTorsoPitch + chestLean, -pelvisYaw * (1.6f - kickW * 1.2f), -pelvisRoll + kickTorsoRoll);
             head.localRotation = Quaternion.Euler(-lean * 0.5f, pelvisYaw * 0.6f, 0f); // eyes stay on the play
 
             // Arms swing opposite to the legs, bent at the elbow. Off balance or jockeying: arms out wide.

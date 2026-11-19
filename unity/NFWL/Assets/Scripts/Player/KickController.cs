@@ -43,10 +43,15 @@ namespace NFWL
             public float followHeight;
             public float loft;        // 0 driven .. 1 lofted (body leans back)
             public float power;       // 0..1
+            public bool header;       // struck with the head (no foot swing)
         }
 
+        public bool Header { get; private set; }
+        /// <summary>Predicted ball centre at contact (for the head / body pose).</summary>
+        public Vector3 BallAtContact { get; private set; }
+
         /// <summary>Starts a kick. Returns false if one is already running.</summary>
-        public bool Begin(Ball ball, Vector3 dir, float side, Form form, float now)
+        public bool Begin(Ball ball, Vector3 dir, float side, Form form, float now, float contactAt = -1f)
         {
             if (Active) return false;
             dir.y = 0f;
@@ -71,6 +76,32 @@ namespace NFWL
             float downswing = 0.06f + 0.03f * form.power;
             float follow = 0.16f + 0.12f * form.power;
             float recover = 0.18f + 0.12f * form.power;
+            if (form.header)
+            {
+                backswing = 0.12f;
+                downswing = 0.06f;
+                follow = 0.2f;
+                recover = 0.3f;
+            }
+
+            if (contactAt > now)
+            {
+                // The ball is still arriving: fit the timeline so contact happens when it gets here,
+                // shortening the swing if there is not enough time (a quicker, less powerful strike).
+                float avail = contactAt - now;
+                float swing = backswing + downswing;
+                if (avail < swing + 0.04f)
+                {
+                    float k = Mathf.Max(0.3f, (avail - 0.04f) / swing);
+                    backswing *= k;
+                    downswing *= k;
+                    swing = backswing + downswing;
+                }
+                float pre = Mathf.Max(0.04f, avail - swing + 0.02f);
+                prep = pre * 0.5f;
+                approach = pre * 0.5f;
+            }
+            Header = form.header;
 
             StartTime = now;
             PlantTime = now + prep + approach;
@@ -80,14 +111,15 @@ namespace NFWL
             RecoverEndTime = FollowEndTime + recover;
             Phase = KickPhase.Preparation;
 
+            BallAtContact = ball.PredictPosition(ContactTime - now);
             if (p.Model != null)
             {
-                float tContact = ContactTime - now;
-                Vector3 ballAt = ball.PredictPosition(tContact);
+                Vector3 ballAt = BallAtContact;
                 Vector3 right = new Vector3(dir.z, 0f, -dir.x);
                 // Plant foot beside the ball on the other side, toes toward the target.
                 Vector3 plant = new Vector3(ballAt.x, 0f, ballAt.z) - dir * 0.08f - right * (Side * 0.24f);
                 p.Model.BeginKickPose(this, form);
+                if (form.header) return true; // no foot swing for a header
                 p.Model.BeginPlantFoot(-Side, now + prep * 0.5f, PlantTime, FollowEndTime, plant, PlayerLocomotion.DirToYaw(dir, 0f));
                 p.Model.BeginFootAction(Side, PlantTime - 0.04f, ContactTime, FollowEndTime, form.style, dir, ballAt,
                     form.backswing, form.follow, BackswingTime, form.followHeight);

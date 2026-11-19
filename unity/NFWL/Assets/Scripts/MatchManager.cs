@@ -29,7 +29,7 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime;
 
-        public const string Version = "NFWL Unity v0.6-dev  STEP 5";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 6";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -40,6 +40,9 @@ namespace NFWL
         Ball ball;
         readonly List<PlayerController> home = new List<PlayerController>();
         readonly List<PlayerController> away = new List<PlayerController>();
+        readonly List<PlayerController> all = new List<PlayerController>();
+        string kickLabel = "";
+        float kickLabelUntil;
         PlayerController human;
         Transform marker;
         Transform cameraAnchor;
@@ -75,6 +78,8 @@ namespace NFWL
             ball = Ball.Create();
 
             SpawnTeams();
+            all.AddRange(home);
+            all.AddRange(away);
             foreach (PlayerController p in AllPlayers())
             {
                 p.Match = this;
@@ -343,6 +348,29 @@ namespace NFWL
             KeyInput.EndFrame();
         }
 
+        void FixedUpdate()
+        {
+            // Ball against bodies (legs, torso, head) - v0.6 PHASE 4.4.
+            if (!fullTime) BallContacts.Step(ball, all, Time.fixedDeltaTime, Time.time);
+        }
+
+        /// <summary>All ten players (read only use).</summary>
+        public List<PlayerController> AllPlayersList => all;
+
+        /// <summary>Shows the name of a kick (FINESSE SHOT, THROUGH PASS...) for a moment.</summary>
+        public void ShowKickLabel(PlayerController kicker, string label)
+        {
+            kickLabel = (kicker.teamIndex == 0 ? homeShort : awayShort) + " #" + kicker.number + "  " + label;
+            kickLabelUntil = Time.time + 1.6f;
+        }
+
+        /// <summary>The ball hit a player's body (a block, a chest, a head).</summary>
+        public void OnBodyContact(PlayerController p, string part, float speed)
+        {
+            if (speed > 10f && p.teamIndex != (ball.LastTouchedBy != null ? ball.LastTouchedBy.teamIndex : -1))
+                ShowKickLabel(p, part == "Head" ? "HEAD BLOCK" : "BLOCK");
+        }
+
         void OnApplicationFocus(bool hasFocus)
         {
             if (!hasFocus) KeyInput.ReleaseAll();
@@ -522,9 +550,11 @@ namespace NFWL
             DrawEvent();
             DrawPlayerCard();
             DrawPowerGauge();
+            if (Time.time < kickLabelUntil)
+                Label(new Rect(0f, Screen.height - 128f, Screen.width, 24f), kickLabel, bigStyle.WithSize(18), Gold);
 
             Label(new Rect(16f, Screen.height - 26f, Screen.width - 32f, 22f),
-                "WASD: move   Shift: sprint   J: pass   L: long pass   K: shoot (hold = power)   Q: switch player   Z: zoom   R: reset",
+                "WASD: move   Shift: sprint   J: pass (Alt+J through)   L: long (Alt+L lofted through)   K: shoot (Shift+K power, Alt+K finesse, Ctrl+K low)   Q: switch   Z: zoom   R: reset",
                 smallStyle, new Color(1f, 1f, 1f, 0.85f));
             if (string.IsNullOrEmpty(KeyInput.LastKey))
             {

@@ -16,7 +16,8 @@ namespace NFWL
         public float massKg = 0.40f;
         [Tooltip("v0.6: 0, drag and rolling resistance are applied explicitly (see NFWLTuning.ball)")]
         public float linearDamping = 0f;
-        public float angularDamping = 0.6f;
+        [Tooltip("v0.6: spin decay is handled explicitly (NFWLTuning.ball.spinDecay)")]
+        public float angularDamping = 0.05f;
         public float friction = 0.7f;
 
         public Rigidbody Body { get; private set; }
@@ -31,6 +32,14 @@ namespace NFWL
         /// <summary>The keeper holds the ball in his hands (moved kinematically by him).</summary>
         public bool HeldInHands { get; set; }
 
+        /// <summary>Raised on hard contacts: (what was hit, impact speed). Used for sound and effects.</summary>
+        public event System.Action<string, float> Impact;
+
+        Transform squashPivot, visual;
+        float squashUntil;
+        Vector3 squashDir = Vector3.forward;
+        float squashAmount;
+
         public static Ball Create()
         {
             GameObject go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -40,10 +49,15 @@ namespace NFWL
             // The real ball is only 22cm wide, tiny from the broadcast camera, so the visible ball
             // is drawn 1.6x bigger (physics keeps the real size).
             go.GetComponent<Renderer>().enabled = false;
-            Visuals.Part(PrimitiveType.Sphere, go.transform, Vector3.zero, Vector3.one * 1.6f,
+            // Squash pivot: briefly flattens the ball along the impact direction (deformation visual).
+            Transform pivot = Visuals.Pivot(go.transform, Vector3.zero, "BallSquash");
+            GameObject vis = Visuals.Part(PrimitiveType.Sphere, pivot, Vector3.zero, Vector3.one * 1.6f,
                 Visuals.Mat(Color.white, 0.55f, Visuals.Ball), "BallVisual");
             go.AddComponent<Rigidbody>();
-            return go.AddComponent<Ball>();
+            Ball b = go.AddComponent<Ball>();
+            b.squashPivot = pivot;
+            b.visual = vis.transform;
+            return b;
         }
 
         void Awake()
@@ -80,15 +94,47 @@ namespace NFWL
         public bool IsGrounded => Body.position.y < PitchDims.BallRadius + 0.03f && Mathf.Abs(Body.linearVelocity.y) < 0.6f;
 
         /// <summary>A kick (pass, shot, clearance): the ball leaves the player.</summary>
-        public void Kick(Vector3 velocity, PlayerController kicker)
+        public void Kick(Vector3 velocity, PlayerController kicker) => Kick(velocity, Vector3.zero, kicker);
+
+        /// <summary>A kick with spin (rad/s, world axis): sidespin curls, topspin dips, backspin floats.</summary>
+        public void Kick(Vector3 velocity, Vector3 spin, PlayerController kicker)
         {
             LastTouchedBy = kicker;
             LastTouchTime = Time.time;
             Owner = null;
             HeldInHands = false;
-            // Spin around the axis perpendicular to the flight, so the patches roll visibly.
-            Body.angularVelocity = Vector3.Cross(Vector3.up, velocity) / PitchDims.BallRadius;
+            Body.angularVelocity = spin;
             Body.linearVelocity = velocity;
+            Squash(velocity, Mathf.Clamp01(velocity.magnitude / 30f));
+            Impact?.Invoke("Kick", velocity.magnitude);
+        }
+
+        /// <summary>Spin of the ball (rad/s).</summary>
+        public Vector3 Spin => Body.angularVelocity;
+
+        void Squash(Vector3 dir, float amount)
+        {
+            if (dir.sqrMagnitude < 0.01f) return;
+            squashDir = dir.normalized;
+            squashAmount = Mathf.Clamp01(amount);
+            squashUntil = Time.time + 0.07f;
+        }
+
+        void LateUpdate()
+        {
+            if (squashPivot == null) return;
+            float w = Time.time < squashUntil ? squashAmount * ((squashUntil - Time.time) / 0.07f) : 0f;
+            if (w <= 0.001f)
+            {
+                squashPivot.localRotation = Quaternion.identity;
+                squashPivot.localScale = Vector3.one;
+                visual.localRotation = Quaternion.identity;
+                return;
+            }
+            // Flatten along the hit direction, bulge around it; the visual keeps the ball's rotation.
+            squashPivot.rotation = Quaternion.LookRotation(squashDir);
+            squashPivot.localScale = new Vector3(1f + 0.12f * w, 1f + 0.12f * w, 1f - 0.22f * w);
+            visual.rotation = transform.rotation;
         }
 
         /// <summary>A dribble touch: new velocity from a foot contact, the dribbler keeps possession.</summary>
@@ -99,6 +145,8 @@ namespace NFWL
             Body.linearVelocity = velocity;
             Vector3 flat = new Vector3(velocity.x, 0f, velocity.z);
             Body.angularVelocity = Vector3.Cross(Vector3.up, flat) / PitchDims.BallRadius;
+            Squash(velocity, Mathf.Clamp01(velocity.magnitude / 25f) * 0.5f);
+            Impact?.Invoke("Touch", velocity.magnitude);
         }
 
         public void ResetBall(Vector3 position)
@@ -117,10 +165,13 @@ namespace NFWL
             if (HeldInHands) return;
             float dt = Time.fixedDeltaTime;
             Vector3 v = Body.linearVelocity;
-            v = ApplyForces(v, IsGrounded, dt, Tuning);
+            Vector3 w = Body.angularVelocity;
+            bool grounded = IsGrounded;
+            v = ApplyForces(v, w, grounded, dt, Tuning);
             Body.linearVelocity = v;
+            if (!grounded) Body.angularVelocity = w * Mathf.Max(0f, 1f - Tuning.spinDecay * dt);
 
-            if (IsGrounded)
+            if (grounded)
             {
                 // On the grass the ball rolls without slipping.
                 Vector3 flat = new Vector3(v.x, 0f, v.z);
@@ -129,14 +180,57 @@ namespace NFWL
             }
         }
 
-        /// <summary>Air drag always; rolling resistance while on the ground.</summary>
-        static Vector3 ApplyForces(Vector3 v, bool grounded, float dt, BallTuning t)
+        void OnCollisionEnter(Collision c)
+        {
+            if (c.contactCount == 0) return;
+            Vector3 n = c.GetContact(0).normal;
+            float impact = c.relativeVelocity.magnitude;
+            string what = c.collider.name;
+            BallTuning t = Tuning;
+            Vector3 v = Body.linearVelocity;
+
+            if (what == "NetCollider")
+            {
+                // The net gives: most of the pace is absorbed instead of bouncing back.
+                Body.linearVelocity = v * t.netAbsorb;
+                Body.angularVelocity *= 0.3f;
+                Impact?.Invoke("Net", impact);
+                return;
+            }
+            if (what == "Post" || what == "Crossbar")
+            {
+                // Hard woodwork: reflect off the frame (impact response).
+                Vector3 inV = -c.relativeVelocity;
+                Vector3 refl = Vector3.Reflect(inV, n) * t.postRestitution;
+                Body.linearVelocity = refl;
+                Squash(n, Mathf.Clamp01(impact / 25f));
+                Impact?.Invoke("Post", impact);
+                return;
+            }
+            if (n.y > 0.7f && impact > 1.5f)
+            {
+                // Bounce on the grass: spin grips the surface (backspin checks, topspin skids on).
+                Vector3 contactVel = v + Vector3.Cross(Body.angularVelocity, -n * PitchDims.BallRadius);
+                Vector3 slip = Vector3.ProjectOnPlane(contactVel, n);
+                Body.linearVelocity = v - slip * t.bounceGrip;
+                Squash(Vector3.down, Mathf.Clamp01(impact / 20f) * 0.6f);
+                if (impact > 4f) Impact?.Invoke("Bounce", impact);
+            }
+        }
+
+        /// <summary>Air drag always; Magnus (curve from spin) in the air; rolling resistance on the ground.</summary>
+        static Vector3 ApplyForces(Vector3 v, Vector3 spin, bool grounded, float dt, BallTuning t)
         {
             float speed = v.magnitude;
             if (speed > 0.01f)
             {
                 float drop = t.DragK * speed * speed * dt;
                 v *= Mathf.Max(0f, 1f - drop / speed);
+            }
+            if (!grounded && spin.sqrMagnitude > 1f)
+            {
+                Vector3 magnus = Vector3.ClampMagnitude(t.magnusFactor * Vector3.Cross(spin, v), t.maxMagnusAccel);
+                v += magnus * dt;
             }
             if (grounded)
             {
@@ -150,10 +244,13 @@ namespace NFWL
         }
 
         /// <summary>Where the ball will be after t seconds (no players, flat pitch). Same model as FixedUpdate.</summary>
-        public Vector3 PredictPosition(float t) => Simulate(Body.position, Body.linearVelocity, t, out _);
+        public Vector3 PredictPosition(float t) => Simulate(Body.position, Body.linearVelocity, Body.angularVelocity, t, out _);
 
         /// <summary>Integrates the ball model from p, v for t seconds (gravity, bounce, drag, rolling).</summary>
-        public static Vector3 Simulate(Vector3 p, Vector3 v, float t, out Vector3 vEnd)
+        public static Vector3 Simulate(Vector3 p, Vector3 v, float t, out Vector3 vEnd) => Simulate(p, v, Vector3.zero, t, out vEnd);
+
+        /// <summary>Integrates the ball model with spin.</summary>
+        public static Vector3 Simulate(Vector3 p, Vector3 v, Vector3 spin, float t, out Vector3 vEnd)
         {
             BallTuning bt = Tuning;
             const float step = 0.02f;
@@ -165,7 +262,9 @@ namespace NFWL
                 float dt = Mathf.Min(step, t - time);
                 bool grounded = p.y < r + 0.03f && Mathf.Abs(v.y) < 0.6f;
                 if (!grounded) v.y += g * dt;
-                v = ApplyForces(v, grounded, dt, bt);
+                v = ApplyForces(v, spin, grounded, dt, bt);
+                if (grounded) spin = Vector3.zero;
+                else spin *= Mathf.Max(0f, 1f - bt.spinDecay * dt);
                 p += v * dt;
                 if (p.y < r)
                 {

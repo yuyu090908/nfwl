@@ -15,6 +15,7 @@ namespace NFWL
         public LocomotionTuning locomotion = new LocomotionTuning();
         public DribbleTuning dribble = new DribbleTuning();
         public BallTuning ball = new BallTuning();
+        public InputTuning input = new InputTuning();
 
         static NFWLTuning instance;
 
@@ -107,6 +108,19 @@ namespace NFWL
         public float airDensity = 1.2f;
         public float restitution = 0.55f;
 
+        [Tooltip("Magnus (curve) strength: a = k * (spin x velocity). Physical value about 0.0063")]
+        public float magnusFactor = 0.0063f;
+        [Tooltip("Upper limit of the sideways curve acceleration (m/s^2), keeps curl realistic")]
+        public float maxMagnusAccel = 9f;
+        [Tooltip("Spin lost per second in the air (fraction)")]
+        public float spinDecay = 0.08f;
+        [Tooltip("Grip between ball and grass on a bounce (spin vs. skid)")]
+        public float bounceGrip = 0.35f;
+        [Tooltip("Speed kept when the ball hits the net (fraction)")]
+        public float netAbsorb = 0.2f;
+        [Tooltip("Bounce off posts and crossbar")]
+        public float postRestitution = 0.7f;
+
         /// <summary>Quadratic drag factor k in a = k * v^2 (1/m).</summary>
         public float DragK => 0.5f * airDensity * dragCoefficient * Mathf.PI * PitchDims.BallRadius * PitchDims.BallRadius / 0.40f;
     }
@@ -141,5 +155,19 @@ namespace NFWL
         public Vector2 lineAssist = new Vector2(0.8f, 2.5f);
         [Tooltip("Opponent closer than this behind or beside a slow player makes him shield the ball")]
         public float shieldDistance = 1.8f;
+    }
+
+    /// <summary>Kick modifiers (PHASE 3.2). Existing keys J / K / L / Shift stay as they were.</summary>
+    [System.Serializable]
+    public class InputTuning
+    {
+        [Tooltip("Held with K: finesse (curl) shot. Held with J: through pass. Held with L: lofted through pass")]
+        public KeyCode finesseModifier = KeyCode.LeftAlt;
+        [Tooltip("Held with K: power shot (only when pressed just before or during the K press, so sprinting + K stays a normal shot)")]
+        public KeyCode powerModifier = KeyCode.LeftShift;
+        [Tooltip("Held with K: low driven shot")]
+        public KeyCode lowModifier = KeyCode.LeftControl;
+        [Tooltip("Shift pressed at most this long before K counts as power shot instead of sprint")]
+        public float powerShiftWindow = 0.25f;
     }
 }
