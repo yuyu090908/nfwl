@@ -44,8 +44,10 @@ namespace NFWL
         public bool IsHuman { get; set; }
         public bool HasBall { get; private set; }
         public bool Sprinting { get; private set; }
-        public float Speed => new Vector3(velocity.x, 0f, velocity.z).magnitude;
-        public Vector3 Velocity => velocity;
+        public float Speed => loco.Speed;
+        public Vector3 Velocity => loco.Velocity;
+        /// <summary>Movement with momentum, body facing and balance (v0.6 PHASE 1).</summary>
+        public PlayerLocomotion Locomotion => loco;
         public PlayerModel Model { get; private set; }
         public MatchManager Match { get; set; }
         public float AttackSign => teamIndex == 0 ? 1f : -1f;
@@ -53,7 +55,7 @@ namespace NFWL
         CharacterController controller;
         Ball ball;
         Vector2 moveInput;
-        Vector3 velocity;
+        readonly PlayerLocomotion loco = new PlayerLocomotion();
         float noControlUntil;
         float saveCooldownUntil;
 
@@ -66,12 +68,6 @@ namespace NFWL
         float bufferedPower;
         bool bufferedTap;
         float bufferedUntil;
-
-        float dashSpeed = 6.7f;
-        float runSpeed = 4.7f;
-        float maxAcceleration;
-        float brakingDeceleration;
-        float rotationRate;
 
         // AI state
         float aiNextDecision;
@@ -124,20 +120,8 @@ namespace NFWL
 
         public void ApplyAttributes()
         {
-            dashSpeed = Rules.AttrLerp(attributes.Speed, 6.0f, 7.4f);
-            runSpeed = dashSpeed * 0.7f;
-            float accelTime = Rules.AttrLerp(attributes.Acceleration, 1.6f, 1.0f);
-            maxAcceleration = dashSpeed / accelTime;
-            brakingDeceleration = dashSpeed / 0.3f;
-            rotationRate = Rules.AttrLerp(attributes.Agility, 420f, 720f);
-        }
-
-        float CurrentMaxSpeed()
-        {
-            float speed = Sprinting ? dashSpeed : runSpeed;
-            if (charging && chargeType == KickType.Shoot) speed *= 0.7f; // Full Spec 3.6.2
-            if (HasBall) speed *= 0.92f;
-            return speed;
+            // Speed / Acceleration / Agility drive the locomotion (values in NFWLTuning, v0.5 baseline).
+            loco.Configure(attributes, NFWLTuning.Current.locomotion);
         }
 
         // -------------------------------------------------------------------
@@ -213,41 +197,47 @@ namespace NFWL
 
         void Move(float dt)
         {
+            // In the Editor, pick up tuning edits made in the Inspector during Play.
+            if (Application.isEditor && Time.frameCount % 60 == 0) ApplyAttributes();
             Vector3 dir = InputWorldDirection();
-            Vector3 horizontal = new Vector3(velocity.x, 0f, velocity.z);
+            LocomotionTuning lt = NFWLTuning.Current.locomotion;
 
-            if (dir != Vector3.zero)
+            LocoInput input = new LocoInput
             {
-                Vector3 target = dir * CurrentMaxSpeed() * Mathf.Min(1f, moveInput.magnitude);
-                horizontal = Vector3.MoveTowards(horizontal, target, maxAcceleration * dt);
-                Quaternion want = Quaternion.LookRotation(dir, Vector3.up);
-                transform.rotation = Quaternion.RotateTowards(transform.rotation, want, rotationRate * dt);
-            }
-            else
+                moveDir = dir,
+                moveAmount = Mathf.Min(1f, moveInput.magnitude),
+                sprint = Sprinting,
+                hasBall = HasBall,
+                speedScale = charging && chargeType == KickType.Shoot ? 0.7f : 1f // Full Spec 3.6.2
+            };
+
+            PlayerController carrier = ball != null ? ball.Owner : null;
+            if (!HasBall && role != Role.GK && carrier != null && carrier.teamIndex != teamIndex && !Sprinting)
             {
-                horizontal = Vector3.MoveTowards(horizontal, Vector3.zero, brakingDeceleration * dt);
-                // Idle players turn to watch the ball.
-                if (ball != null && horizontal.sqrMagnitude < 0.5f && !HasBall)
+                // Defensive stance: face the ball carrier and shuffle instead of turning away.
+                Vector3 toCarrier = carrier.transform.position - transform.position;
+                toCarrier.y = 0f;
+                if (toCarrier.magnitude < lt.jockeyDistance)
                 {
-                    Vector3 toBall = ball.transform.position - transform.position;
-                    toBall.y = 0f;
-                    if (toBall.sqrMagnitude > 0.25f)
-                    {
-                        transform.rotation = Quaternion.RotateTowards(transform.rotation,
-                            Quaternion.LookRotation(toBall.normalized, Vector3.up), rotationRate * 0.5f * dt);
-                    }
+                    input.jockey = true;
+                    input.faceDir = toCarrier;
                 }
             }
-
-            velocity = horizontal;
-            Vector3 before = transform.position;
-            controller.Move((horizontal + Vector3.down * 2f) * dt);
-            // Use the real displacement, so bumping into someone slows you down.
-            if (dt > 0f)
+            else if (dir == Vector3.zero && !HasBall && ball != null && loco.Speed < 0.7f)
             {
-                Vector3 moved = (transform.position - before) / dt;
-                velocity = new Vector3(moved.x, 0f, moved.z);
+                // Idle players turn to watch the ball.
+                Vector3 toBall = ball.transform.position - transform.position;
+                toBall.y = 0f;
+                if (toBall.sqrMagnitude > 0.25f) input.faceDir = toBall;
             }
+
+            loco.Tick(input, dt);
+
+            Vector3 before = transform.position;
+            controller.Move((loco.Velocity + Vector3.down * 2f) * dt);
+            // Use the real displacement, so bumping into someone slows you down.
+            if (dt > 0f) loco.SetActualVelocity((transform.position - before) / dt);
+            transform.rotation = Quaternion.Euler(0f, loco.FacingYaw, 0f);
 
             Vector3 p = transform.position;
             p.x = Mathf.Clamp(p.x, -PitchDims.HalfLength - 2.5f, PitchDims.HalfLength + 2.5f);
@@ -413,6 +403,7 @@ namespace NFWL
             float elev = Mathf.Max(0f, elevationDeg + pitchError) * Mathf.Deg2Rad;
             Vector3 kickVelocity = dir * (speed * Mathf.Cos(elev)) + Vector3.up * (speed * Mathf.Sin(elev));
 
+            loco.SnapFacing(dir);
             transform.rotation = Quaternion.LookRotation(dir, Vector3.up);
             ball.Kick(kickVelocity, this);
             if (Model != null) Model.PlayKick();
@@ -448,7 +439,7 @@ namespace NFWL
             controller.enabled = false;
             transform.SetPositionAndRotation(position, rotation);
             controller.enabled = true;
-            velocity = Vector3.zero;
+            loco.Reset(rotation * Vector3.forward);
             charging = false;
             kickBuffered = false;
         }
@@ -486,7 +477,7 @@ namespace NFWL
                 }
                 else
                 {
-                    Vector3 rel = ballVel - velocity;
+                    Vector3 rel = ballVel - loco.Velocity;
                     rel.y = 0f;
                     float trapLimit = maxTrapRelativeSpeed * Rules.AttrLerp(attributes.BallControl, 0.8f, 1.2f);
                     float maxHeight = role == Role.GK ? 2.3f : 0.8f;
@@ -513,7 +504,7 @@ namespace NFWL
                 // Keeper holds the ball in his hands.
                 Vector3 hands = transform.position + transform.forward * 0.45f + Vector3.up * 1.1f;
                 ball.Body.position = hands;
-                ball.Velocity = velocity;
+                ball.Velocity = loco.Velocity;
                 return;
             }
 
@@ -525,7 +516,7 @@ namespace NFWL
             target.y = ballPos.y;
 
             float gain = Rules.AttrLerp(attributes.BallControl, 6f, 12f);
-            Vector3 desired = velocity + (target - ballPos) * gain;
+            Vector3 desired = loco.Velocity + (target - ballPos) * gain;
             desired.y = ballVel.y;
             ball.Velocity = desired;
         }

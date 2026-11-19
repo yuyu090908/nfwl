@@ -178,18 +178,50 @@ namespace NFWL
         {
             if (owner == null) return;
             float dt = Time.deltaTime;
-            float speed = owner.Speed;
+            PlayerLocomotion lc = owner.Locomotion;
+            float speed = lc.Speed;
             float run = Mathf.Clamp01(speed / 6.5f);
+            LocoState st = lc.State;
+            Vector3 lv = lc.LocalVelocity;
+
+            // Which way the legs cycle: forward, backwards (backpedal) or sideways (side step / jockey).
+            bool sideways = speed > 0.3f && Mathf.Abs(lv.x) > Mathf.Abs(lv.z);
+            bool backwards = !sideways && lv.z < -0.2f;
+            bool crouch = st == LocoState.Jockey || st == LocoState.SideStep || st == LocoState.Backpedal;
 
             // Run cycle: stride frequency rises with speed.
             phase += dt * (4f + speed * 1.6f);
             float s = Mathf.Sin(phase);
             float amp = Mathf.Lerp(0f, 50f, run);
+            if (backwards) amp *= -0.75f;
+            if (sideways) amp *= 0.35f;
 
             float legLAngle = s * amp;
             float legRAngle = -s * amp;
-            float kneeLAngle = Mathf.Max(0f, Mathf.Sin(phase + 1.2f)) * amp * 1.4f + 5f;
-            float kneeRAngle = Mathf.Max(0f, Mathf.Sin(phase + 1.2f + Mathf.PI)) * amp * 1.4f + 5f;
+            float kneeLAngle = Mathf.Max(0f, Mathf.Sin(phase + 1.2f)) * Mathf.Abs(amp) * 1.4f + 5f;
+            float kneeRAngle = Mathf.Max(0f, Mathf.Sin(phase + 1.2f + Mathf.PI)) * Mathf.Abs(amp) * 1.4f + 5f;
+            float legLSide = 0f, legRSide = 0f;
+            if (sideways)
+            {
+                // Side shuffle: legs open and close instead of swinging forward.
+                float open = Mathf.Abs(s) * Mathf.Clamp01(speed / 3f) * 16f;
+                legLSide = -open;
+                legRSide = open;
+            }
+            if (crouch)
+            {
+                kneeLAngle += 22f;
+                kneeRAngle += 22f;
+                legLAngle -= 10f;
+                legRAngle -= 10f;
+            }
+            if (st == LocoState.SharpTurn)
+            {
+                // Plant: brace with the outside leg forward.
+                legLAngle = Mathf.Lerp(legLAngle, -28f, 0.6f);
+                legRAngle = Mathf.Lerp(legRAngle, 12f, 0.6f);
+                kneeLAngle = Mathf.Max(kneeLAngle, 30f);
+            }
 
             // Kick: wind up then swing the right leg through.
             if (kickTimer >= 0f)
@@ -203,27 +235,31 @@ namespace NFWL
                     legRAngle = swing;
                     kneeRAngle = k < 0.4f ? 70f * (k / 0.4f) : Mathf.Lerp(70f, 0f, (k - 0.4f) / 0.6f);
                     legLAngle = -10f;
+                    legLSide = legRSide = 0f;
                 }
             }
 
-            legL.localRotation = Quaternion.Euler(legLAngle, 0f, 0f);
-            legR.localRotation = Quaternion.Euler(legRAngle, 0f, 0f);
+            legL.localRotation = Quaternion.Euler(legLAngle, 0f, legLSide);
+            legR.localRotation = Quaternion.Euler(legRAngle, 0f, legRSide);
             kneeL.localRotation = Quaternion.Euler(kneeLAngle, 0f, 0f);
             kneeR.localRotation = Quaternion.Euler(kneeRAngle, 0f, 0f);
 
-            // Arms swing opposite to legs, bent at the elbow.
-            float armAmp = amp * 0.8f;
-            armL.localRotation = Quaternion.Euler(-s * armAmp, 0f, -8f);
-            armR.localRotation = Quaternion.Euler(s * armAmp, 0f, 8f);
+            // Arms swing opposite to legs, bent at the elbow. Off balance or jockeying: arms out wide.
+            float armAmp = Mathf.Abs(amp) * 0.8f;
+            float armOut = st == LocoState.Recovery ? 45f : crouch ? 22f : 8f;
+            armL.localRotation = Quaternion.Euler(-s * armAmp, 0f, -armOut);
+            armR.localRotation = Quaternion.Euler(s * armAmp, 0f, armOut);
             elbowL.localRotation = Quaternion.Euler(-25f - run * 40f, 0f, 0f);
             elbowR.localRotation = Quaternion.Euler(-25f - run * 40f, 0f, 0f);
 
-            // Body bob and forward lean when running.
-            lean = Mathf.Lerp(lean, run * 12f, dt * 6f);
-            hips.localPosition = new Vector3(0f, 0.95f + Mathf.Abs(Mathf.Cos(phase)) * 0.05f * run, 0f);
+            // Lean from the locomotion (speed, acceleration, braking inertia, balance) and body bob.
+            lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 12f : 0f), 1f - Mathf.Exp(-14f * dt));
+            float drop = crouch ? 0.08f : st == LocoState.SharpTurn ? 0.06f : 0f;
+            hips.localPosition = new Vector3(0f, 0.95f - drop + Mathf.Abs(Mathf.Cos(phase)) * 0.05f * run, 0f);
             torso.localRotation = Quaternion.Euler(lean, Mathf.Sin(phase) * 6f * run, 0f);
 
-            Quaternion bodyRot = Quaternion.identity;
+            // Lean into curves from the feet (the whole body tilts).
+            Quaternion bodyRot = Quaternion.Euler(0f, 0f, lc.LeanRoll);
             Vector3 bodyPos = Vector3.zero;
 
             // Goalkeeper dive: roll to the side and drop.

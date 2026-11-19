@@ -65,6 +65,24 @@ namespace NFWL.EditorTools
             }
         }
 
+        /// <summary>v0.6: writes the tuning values to an asset so they can be edited in the Inspector.</summary>
+        [MenuItem("NFWL/Create Tuning File (調整ファイルを作る)")]
+        static void CreateTuningFile()
+        {
+            const string path = "Assets/Resources/NFWLTuning.asset";
+            NFWLTuning existing = AssetDatabase.LoadAssetAtPath<NFWLTuning>(path);
+            if (existing == null)
+            {
+                Directory.CreateDirectory("Assets/Resources");
+                existing = ScriptableObject.CreateInstance<NFWLTuning>();
+                AssetDatabase.CreateAsset(existing, path);
+                AssetDatabase.SaveAssets();
+                Debug.Log("NFWL: " + path + " を作成しました。Inspector で数値を変えると試合に反映されます。");
+            }
+            Selection.activeObject = existing;
+            EditorGUIUtility.PingObject(existing);
+        }
+
         static void CreateMainScene()
         {
             Directory.CreateDirectory("Assets/Scenes");

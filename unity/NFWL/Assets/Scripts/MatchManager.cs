@@ -29,7 +29,7 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime;
 
-        public const string Version = "NFWL Unity v0.5  Crystalia";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 2";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -513,6 +513,7 @@ namespace NFWL
             DrawScoreboard();
             // Version stamp, so it is easy to tell which build is running.
             Label(new Rect(Screen.width - 260f, 14f, 244f, 20f), Version, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 1f, 1f, 0.6f), false);
+            DrawMotionDebug();
             DrawEvent();
             DrawPlayerCard();
             DrawPowerGauge();
@@ -634,6 +635,15 @@ namespace NFWL
                 Box(new Rect(x + w - 54f, y + 8f, 46f, 18f), new Color(0.2f, 0.9f, 0.4f));
                 Label(new Rect(x + w - 54f, y + 8f, 46f, 18f), "BALL", tagStyle, new Color(0.05f, 0.07f, 0.15f), false);
             }
+        }
+
+        /// <summary>Small readout of the controlled player's movement (v0.6), to check the new motion.</summary>
+        void DrawMotionDebug()
+        {
+            if (human == null) return;
+            PlayerLocomotion lc = human.Locomotion;
+            string text = $"{lc.State}  {lc.Speed:0.0} m/s  lean {lc.LeanPitch:0}/{lc.LeanRoll:0}  bal {lc.Balance:0.00}";
+            Label(new Rect(Screen.width - 420f, 34f, 404f, 20f), text, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(0.6f, 1f, 0.8f, 0.8f), false);
         }
 
         void DrawPowerGauge()
