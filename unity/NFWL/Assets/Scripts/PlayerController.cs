@@ -50,6 +50,8 @@ namespace NFWL
         public float AttackSign => teamIndex == 0 ? 1f : -1f;
         /// <summary>Touch dribbling (v0.6 PHASE 2).</summary>
         public DribbleController Dribble => dribble;
+        /// <summary>Kick timeline (v0.6 PHASE 3).</summary>
+        public KickController Kick => kick;
 
         /// <summary>Error multiplier for a foot (side -1 left, +1 right): 1 on the preferred foot, more on the weak foot.</summary>
         public float WeakFootFactor(float side)
@@ -63,6 +65,14 @@ namespace NFWL
         Vector2 moveInput;
         readonly PlayerLocomotion loco = new PlayerLocomotion();
         DribbleController dribble;
+        KickController kick;
+        // Kick waiting for its contact (decided when the kick starts, struck at contact).
+        KickType strikeType;
+        float strikePower;
+        bool strikeTap;
+        Vector3? strikeAim;
+        Vector3 strikeInputDir;
+        float strikeSide = 1f;
         float noControlUntil;
         float saveCooldownUntil;
 
@@ -117,6 +127,7 @@ namespace NFWL
         {
             controller = GetComponent<CharacterController>();
             dribble = new DribbleController(this);
+            kick = new KickController(this);
             ApplyAttributes();
         }
 
@@ -154,6 +165,7 @@ namespace NFWL
                 if (charging) charging = false;
                 ThinkAI();
             }
+            kick.Tick(Time.time);
             Move(Time.deltaTime);
 
             if (kickBuffered)
@@ -217,11 +229,17 @@ namespace NFWL
                 moveAmount = Mathf.Min(1f, moveInput.magnitude),
                 sprint = Sprinting,
                 hasBall = HasBall,
-                speedScale = charging && chargeType == KickType.Shoot ? 0.7f : 1f // Full Spec 3.6.2
+                speedScale = (charging && chargeType == KickType.Shoot ? 0.7f : 1f) // Full Spec 3.6.2
+                             * kick.SpeedScale(Time.time)
             };
 
             PlayerController carrier = ball != null ? ball.Owner : null;
-            if (HasBall && dribble.Shielding && Match != null)
+            if (kick.Active && Time.time < kick.FollowEndTime)
+            {
+                // Square up to the target while striking (the body turns at its normal rate, no snap).
+                input.faceDir = kick.Direction;
+            }
+            else if (HasBall && dribble.Shielding && Match != null)
             {
                 // Shielding: keep the body between the opponent and the ball (back to him).
                 PlayerController opp = Match.NearestOpponent(this, out _);
@@ -316,6 +334,7 @@ namespace NFWL
         bool BallInKickReach()
         {
             if (ball == null) return false;
+            if (ball.HeldInHands && ball.Owner == this) return true; // keeper drop kick
             Vector3 rel = ball.Body.position - transform.position;
             float y = rel.y;
             rel.y = 0f;
@@ -370,12 +389,83 @@ namespace NFWL
             return best;
         }
 
-        /// <summary>Kicks the ball. aimOverride is used by the AI (direction on the ground).</summary>
+        /// <summary>
+        /// Starts a kick (PHASE 3): picks the foot and the form and runs the kick timeline.
+        /// The ball is struck later, in OnKickContact, when the foot reaches it.
+        /// aimOverride is used by the AI (direction on the ground).
+        /// </summary>
         void PerformKick(KickType type, float power, bool tap, Vector3? aimOverride)
         {
-            if (ball == null || !HasBall) return;
+            if (ball == null || !HasBall || kick.Active) return;
 
-            Vector3 dir = aimOverride ?? KickDirection();
+            Vector3 inputDir = KickDirection();
+            Vector3 dir = aimOverride ?? inputDir;
+            dir.y = 0f;
+            if (type == KickType.Shoot && aimOverride == null)
+            {
+                Vector3 toGoal = AttackGoalCenter - transform.position;
+                toGoal.y = 0f;
+                if (Vector3.Dot(dir.normalized, toGoal.normalized) > 0.64f) dir = (dir.normalized * 0.65f + toGoal.normalized * 0.35f);
+            }
+            dir = dir.sqrMagnitude > 0.0001f ? dir.normalized : loco.Facing;
+
+            // Foot: the preferred foot, unless the ball sits clearly on the other side of the body.
+            Vector3 right = new Vector3(dir.z, 0f, -dir.x);
+            Vector3 rel = ball.Body.position - transform.position;
+            float lx = Vector3.Dot(rel, right);
+            float pref = attributes.PreferredFoot == PreferredFoot.Left ? -1f : 1f;
+            float side = lx * pref < -0.12f ? -pref : pref;
+
+            float p = tap ? (type == KickType.Shoot ? 0.3f : 0.4f) : power;
+            KickController.Form form;
+            switch (type)
+            {
+                case KickType.ShortPass:
+                    // Side-foot pass: short backswing, accuracy first.
+                    form = new KickController.Form { style = FootStyle.Inside, backswing = 0.16f + 0.14f * p, follow = 0.25f, followHeight = 0.08f, loft = 0.1f, power = p * 0.6f };
+                    break;
+                case KickType.LongPass:
+                    // Lofted: big backswing, body leans back, foot gets under the ball.
+                    form = new KickController.Form { style = FootStyle.Laces, backswing = 0.35f + 0.15f * p, follow = 0.45f, followHeight = 0.5f, loft = 0.9f, power = 0.5f + 0.5f * p };
+                    break;
+                default:
+                    // Shot: laces, ankle locked, over the ball; more power = longer backswing.
+                    form = new KickController.Form { style = FootStyle.Laces, backswing = 0.3f + 0.25f * p, follow = 0.4f + 0.2f * p, followHeight = 0.3f + 0.25f * p, loft = p * p * 0.6f, power = p };
+                    break;
+            }
+
+            if (!kick.Begin(ball, dir, side, form, Time.time)) return;
+            strikeType = type;
+            strikePower = power;
+            strikeTap = tap;
+            strikeAim = aimOverride;
+            strikeInputDir = inputDir;
+            strikeSide = side;
+        }
+
+        /// <summary>The kicking foot reaches the ball: now the ball leaves (PHASE 3.1 contact sync).</summary>
+        void OnKickContact()
+        {
+            if (ball == null || !HasBall) return; // lost the ball during the backswing: a fresh-air kick
+            Vector3 rel = ball.Body.position - transform.position;
+            float y = rel.y;
+            rel.y = 0f;
+            if (role == Role.GK && ball.HeldInHands)
+            {
+                // Keeper: the ball was dropped from the hands onto the foot (drop kick).
+                ball.HeldInHands = false;
+            }
+            else if (rel.magnitude > 1.2f || y > 1.3f)
+            {
+                return; // the ball is not at the foot: no contact
+            }
+            StrikeBall(strikeType, strikePower, strikeTap, strikeAim, strikeInputDir);
+        }
+
+        /// <summary>Ball velocity of a pass or shot (v0.5 rules), applied at the moment of contact.</summary>
+        void StrikeBall(KickType type, float power, bool tap, Vector3? aimOverride, Vector3 inputDir)
+        {
+            Vector3 dir = aimOverride ?? inputDir;
             dir.y = 0f;
             dir.Normalize();
             float speed, elevationDeg, errorDeg;
@@ -432,6 +522,7 @@ namespace NFWL
             }
 
             if (Sprinting) errorDeg *= 1.3f;
+            errorDeg *= WeakFootFactor(strikeSide);
 
             float yawError = Random.Range(-errorDeg, errorDeg);
             float pitchError = type == KickType.ShortPass ? 0f : Random.Range(-errorDeg, errorDeg) * 0.5f;
@@ -440,10 +531,7 @@ namespace NFWL
             float elev = Mathf.Max(0f, elevationDeg + pitchError) * Mathf.Deg2Rad;
             Vector3 kickVelocity = dir * (speed * Mathf.Cos(elev)) + Vector3.up * (speed * Mathf.Sin(elev));
 
-            loco.SnapFacing(dir);
-            transform.rotation = Quaternion.LookRotation(dir, Vector3.up);
             ball.Kick(kickVelocity, this);
-            if (Model != null) Model.PlayKick();
             ReleaseBall(kickCooldown);
         }
 
@@ -481,6 +569,8 @@ namespace NFWL
             transform.SetPositionAndRotation(position, rotation);
             controller.enabled = true;
             loco.Reset(rotation * Vector3.forward);
+            kick.Cancel();
+            if (Model != null) Model.CancelAllActions();
             charging = false;
             kickBuffered = false;
         }
@@ -489,6 +579,14 @@ namespace NFWL
         {
             if (ball == null) return;
             if (Match != null && Match.PlayersFrozen) return;
+
+            // Kick timeline: aim the foot at the moving ball and strike it in the contact step.
+            if (kick.BeforeContact)
+            {
+                kick.TrackBall(ball, Time.time);
+                if (kick.ContactDue(Time.time)) OnKickContact();
+                if (HasBall) return; // no dribble touches while winding up
+            }
 
             if (Time.time < noControlUntil)
             {
@@ -552,7 +650,7 @@ namespace NFWL
 
             // Touch dribbling: the ball is only moved by foot contacts (plus a small line assist).
             // While a kick waits for the ball, no new touch pushes it away.
-            if (!(kickBuffered && HasBall))
+            if (!(kickBuffered && HasBall) && !kick.Active)
                 dribble.FixedTick(ball, InputWorldDirection(), Mathf.Min(1f, moveInput.magnitude), Sprinting, Time.time);
         }
 
@@ -640,7 +738,6 @@ namespace NFWL
                 {
                     PlayerController mate = Match.BestPassTarget(this);
                     Vector3 aim = mate != null ? mate.transform.position - transform.position : new Vector3(s, 0f, Random.Range(-0.5f, 0.5f));
-                    ball.Body.position = transform.position + transform.forward * 0.6f + Vector3.up * 0.2f;
                     RequestKick(mate != null && aim.magnitude < 16f ? KickType.ShortPass : KickType.LongPass, 0.6f, false, aim);
                 }
                 return;

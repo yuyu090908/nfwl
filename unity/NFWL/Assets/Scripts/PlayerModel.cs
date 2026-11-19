@@ -198,6 +198,9 @@ namespace NFWL
             public Vector3 dir;    // direction the ball is played
             public FootStyle style;
             public float backswing, follow;
+            public float backTime;       // time the foot reaches the top of the backswing (kicks)
+            public float followHeight;
+            public Vector3 backPos;
             public Vector3 contactPos;
             public float contactYaw, contactPitch;
         }
@@ -210,7 +213,7 @@ namespace NFWL
         /// The ball velocity is changed by the caller at contactTime, so foot and ball stay in sync.
         /// </summary>
         public void BeginFootAction(float side, float startTime, float contactTime, float endTime, FootStyle style,
-            Vector3 dir, Vector3 ballAtContact, float backswing, float followThrough)
+            Vector3 dir, Vector3 ballAtContact, float backswing, float followThrough, float backTime = -1f, float followHeight = -1f)
         {
             dir.y = 0f;
             action = new FootAction
@@ -225,7 +228,9 @@ namespace NFWL
                 dir = dir.sqrMagnitude > 0.0001f ? dir.normalized : owner.Locomotion.Facing,
                 style = style,
                 backswing = backswing,
-                follow = followThrough
+                follow = followThrough,
+                backTime = backTime > startTime ? Mathf.Min(backTime, contactTime - 0.02f) : -1f,
+                followHeight = followHeight >= 0f ? followHeight : 0.04f + followThrough * 0.25f
             };
         }
 
@@ -236,6 +241,15 @@ namespace NFWL
         }
 
         public void CancelFootAction() => action.active = false;
+
+        /// <summary>Stops every foot action and kick pose (kick-off reset).</summary>
+        public void CancelAllActions()
+        {
+            action.active = false;
+            plantAction.active = false;
+            kick = null;
+            kickTimer = -1f;
+        }
 
         /// <summary>Sole point, yaw and pitch of a foot that meets the ball with the given part.</summary>
         void ContactPose(out Vector3 pos, out float yaw, out float pitch)
@@ -274,12 +288,14 @@ namespace NFWL
                     pos = g - d * (r + 0.1f) + Vector3.up * 0.06f;
                     break;
             }
+            // A bouncing or dropping ball: meet it at its height (volley / half volley / drop kick).
+            if (action.style != FootStyle.Sole) pos.y += Mathf.Clamp(action.ball.y - r, 0f, 1.0f);
         }
 
         /// <summary>Writes the action foot's pose into the gait foot. Returns false when no action runs.</summary>
         bool ApplyFootAction(float now)
         {
-            if (!action.active) return false;
+            if (!action.active || now < action.start) return false;
             GaitController.Foot foot = gait.Get(action.side);
             if (!action.started)
             {
@@ -296,30 +312,143 @@ namespace NFWL
             if (now < action.contact)
             {
                 ContactPose(out action.contactPos, out action.contactYaw, out action.contactPitch);
-                float u = Mathf.Clamp01((now - action.start) / (action.contact - action.start));
-                // Quadratic curve through a backswing point behind and above the contact point.
-                Vector3 back = action.contactPos - action.dir * action.backswing + Vector3.up * (0.05f + action.backswing * 0.6f);
-                Vector3 a = Vector3.Lerp(action.startPos, back, u);
-                Vector3 b = Vector3.Lerp(back, action.contactPos, u);
-                foot.position = Vector3.Lerp(a, b, u);
-                float e = u * u * (3f - 2f * u);
-                foot.yaw = Mathf.LerpAngle(action.startYaw, action.contactYaw, e);
-                foot.pitch = Mathf.Lerp(15f, action.contactPitch, e);
+                // Backswing point: behind the contact point, heel kicked up.
+                action.backPos = action.contactPos - action.dir * action.backswing
+                                 + Vector3.up * (0.05f + action.backswing * 0.7f);
+                float e;
+                if (action.backTime > 0f && now < action.backTime)
+                {
+                    // Backswing: the foot leaves the ground and goes back (decelerating at the top).
+                    float u = Mathf.Clamp01((now - action.start) / (action.backTime - action.start));
+                    e = 1f - (1f - u) * (1f - u);
+                    foot.position = Vector3.Lerp(action.startPos, action.backPos, e);
+                    foot.yaw = Mathf.LerpAngle(action.startYaw, action.contactYaw, e * 0.6f);
+                    foot.pitch = Mathf.Lerp(10f, 45f, e);
+                }
+                else if (action.backTime > 0f)
+                {
+                    // Downswing: accelerates through an arc that bottoms out at the ball.
+                    float u = Mathf.Clamp01((now - action.backTime) / (action.contact - action.backTime));
+                    e = u * u;
+                    Vector3 lineP = Vector3.Lerp(action.backPos, action.contactPos, e);
+                    lineP.y = Mathf.Lerp(action.backPos.y, action.contactPos.y, Mathf.Sin(u * Mathf.PI * 0.5f));
+                    foot.position = lineP;
+                    foot.yaw = Mathf.LerpAngle(Mathf.LerpAngle(action.startYaw, action.contactYaw, 0.6f), action.contactYaw, u);
+                    foot.pitch = Mathf.Lerp(45f, action.contactPitch, u);
+                }
+                else
+                {
+                    // Touch: one short arc through a small backswing point.
+                    float u = Mathf.Clamp01((now - action.start) / (action.contact - action.start));
+                    Vector3 a1 = Vector3.Lerp(action.startPos, action.backPos, u);
+                    Vector3 b1 = Vector3.Lerp(action.backPos, action.contactPos, u);
+                    foot.position = Vector3.Lerp(a1, b1, u);
+                    e = u * u * (3f - 2f * u);
+                    foot.yaw = Mathf.LerpAngle(action.startYaw, action.contactYaw, e);
+                    foot.pitch = Mathf.Lerp(15f, action.contactPitch, e);
+                }
             }
             else
             {
-                // Follow through along the line of the ball, then come down to plant.
+                // Follow through along the line of the ball (rising), then come down to plant.
                 float v = Mathf.Clamp01((now - action.contact) / (action.end - action.contact));
                 float ease = 1f - (1f - v) * (1f - v);
                 Vector3 basePos = action.contactPos + action.dir * (action.follow * ease);
                 basePos.y = Mathf.Lerp(action.contactPos.y, 0f, ease);
-                foot.position = basePos + Vector3.up * (Mathf.Sin(v * Mathf.PI) * (0.04f + action.follow * 0.25f));
+                foot.position = basePos + Vector3.up * (Mathf.Sin(v * Mathf.PI) * action.followHeight);
                 foot.yaw = Mathf.LerpAngle(action.contactYaw, owner.Locomotion.FacingYaw, v * v);
                 foot.pitch = Mathf.Lerp(action.contactPitch, 0f, v);
             }
             return true;
         }
 
+        // ---------------- kick: plant foot and body form (PHASE 3) ----------------
+
+        struct PlantAction
+        {
+            public bool active, started;
+            public float side, start, land, end;
+            public Vector3 from, target;
+            public float fromYaw, yaw;
+        }
+        PlantAction plantAction;
+        KickController kick;
+        KickController.Form kickForm;
+
+        /// <summary>Support foot steps beside the ball and stays planted through the strike.</summary>
+        public void BeginPlantFoot(float side, float start, float land, float end, Vector3 target, float yaw)
+        {
+            plantAction = new PlantAction
+            {
+                active = true, side = side < 0f ? -1f : 1f, start = start, land = Mathf.Max(land, start + 0.04f),
+                end = end, target = target, yaw = yaw
+            };
+        }
+
+        public void BeginKickPose(KickController k, KickController.Form form)
+        {
+            kick = k;
+            kickForm = form;
+        }
+
+        bool ApplyPlantFoot(float now)
+        {
+            if (!plantAction.active || now < plantAction.start) return false;
+            GaitController.Foot foot = gait.Get(plantAction.side);
+            if (!plantAction.started)
+            {
+                plantAction.started = true;
+                plantAction.from = foot.position;
+                plantAction.fromYaw = foot.yaw;
+                plantAction.target.y = GaitController.GroundHeight(plantAction.target, out _);
+            }
+            if (now >= plantAction.end) { plantAction.active = false; return false; }
+            if (now < plantAction.land)
+            {
+                float u = Mathf.Clamp01((now - plantAction.start) / (plantAction.land - plantAction.start));
+                float e = u * u * (3f - 2f * u);
+                Vector3 p = Vector3.Lerp(plantAction.from, plantAction.target, e);
+                p.y += Mathf.Sin(u * Mathf.PI) * 0.12f;
+                foot.position = p;
+                foot.yaw = Mathf.LerpAngle(plantAction.fromYaw, plantAction.yaw, e);
+                foot.pitch = Mathf.Lerp(10f, -8f, u);
+            }
+            else
+            {
+                foot.position = plantAction.target;
+                foot.yaw = plantAction.yaw;
+                foot.pitch = 0f;
+            }
+            return true;
+        }
+
+        /// <summary>Hip turn, lean and arm balance during a kick (0 when no kick runs).</summary>
+        void KickBody(float now, out float weight, out float pelvisYaw, out float torsoPitch, out float torsoRoll,
+            out Vector3 armLEuler, out Vector3 armREuler)
+        {
+            weight = 0f; pelvisYaw = 0f; torsoPitch = 0f; torsoRoll = 0f;
+            armLEuler = armREuler = Vector3.zero;
+            if (kick == null || !kick.Active) return;
+            float side = kick.Side;
+            float wIn = Mathf.InverseLerp(kick.StartTime, kick.PlantTime, now);
+            float wOut = 1f - Mathf.InverseLerp(kick.FollowEndTime, kick.RecoverEndTime, now);
+            weight = Mathf.Clamp01(Mathf.Min(wIn * 1.5f, wOut));
+            float back = Mathf.InverseLerp(kick.PlantTime, kick.BackswingTime, now);
+            float through = Mathf.InverseLerp(kick.BackswingTime, kick.FollowEndTime, now);
+            float pw = 0.6f + 0.4f * kickForm.power;
+            // Kicking hip goes back in the backswing, then the pelvis rotates through the ball.
+            pelvisYaw = side * (-28f * back * (1f - through) + 32f * through) * pw;
+            torsoPitch = Mathf.Lerp(14f, -10f, kickForm.loft) * weight;
+            // Lean away from the kicking leg, over the plant foot.
+            torsoRoll = side * 11f * weight;
+            // Arm on the plant-foot side out wide for balance, the other one back.
+            Vector3 balance = new Vector3(-25f, 0f, -70f);
+            Vector3 counter = new Vector3(35f - 60f * through, 0f, 20f);
+            if (side > 0f) { armLEuler = balance; armREuler = new Vector3(counter.x, 0f, counter.z); }
+            else { armREuler = new Vector3(balance.x, 0f, -balance.z); armLEuler = new Vector3(counter.x, 0f, -counter.z); }
+        }
+
+        /// <summary>v0.5 compatibility: a quick kick swing with no timeline (kicks now use KickController).</summary>
         public void PlayKick() { kickTimer = 0f; }
 
         public void PlayDive(float side) { diveTimer = 0f; diveSide = Mathf.Sign(side == 0f ? 1f : side); }
@@ -379,13 +508,20 @@ namespace NFWL
             // ---------- feet (gait with foot locking) ----------
             bool kicking = kickTimer >= 0f;
             float now = Time.time;
-            bool actionLeft = action.active && action.side < 0f && now < action.end;
-            bool actionRight = action.active && action.side > 0f && now < action.end;
-            gait.Right.overridden = kicking || actionRight;
-            gait.Left.overridden = actionLeft;
+            bool actionOn = action.active && now >= action.start && now < action.end;
+            bool plantOn = plantAction.active && now >= plantAction.start && now < plantAction.end;
+            bool actionLeft = actionOn && action.side < 0f;
+            bool actionRight = actionOn && action.side > 0f;
+            bool plantLeft = plantOn && plantAction.side < 0f;
+            bool plantRight = plantOn && plantAction.side > 0f;
+            gait.Right.overridden = kicking || actionRight || plantRight;
+            gait.Left.overridden = actionLeft || plantLeft;
             bool pivoting = st == LocoState.PivotTurn || st == LocoState.SharpTurn || speed < 0.35f;
             gait.Tick(root, lc.Velocity, lc.FacingYaw, dt, sc, crouch ? 1.9f : 1f, pivoting);
             ApplyFootAction(now);
+            ApplyPlantFoot(now);
+            KickBody(now, out float kickW, out float kickPelvisYaw, out float kickTorsoPitch, out float kickTorsoRoll,
+                out Vector3 kickArmL, out Vector3 kickArmR);
             float run = gait.RunAmount;
 
             // IK weights: feet follow the ground unless the body is in the air or a kick drives the leg.
@@ -398,7 +534,7 @@ namespace NFWL
             float crouchDrop = crouch ? 0.1f : st == LocoState.SharpTurn ? 0.07f : st == LocoState.Recovery ? 0.05f : 0f;
             // Pelvis twists toward the leg that swings forward; shoulders twist the other way.
             float legSignal = LegForwardSignal();
-            float pelvisYaw = legSignal * 9f * run;
+            float pelvisYaw = legSignal * 9f * run * (1f - kickW) + kickPelvisYaw;
             float pelvisRoll = -legSignal * 2.5f * run;
             hips.localRotation = Quaternion.Euler(0f, pelvisYaw, pelvisRoll);
             hips.localPosition = new Vector3(0f, HipHeight - crouchDrop - bob, 0f);
@@ -413,7 +549,7 @@ namespace NFWL
 
             // ---------- upper body ----------
             lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 14f : 0f), 1f - Mathf.Exp(-14f * dt));
-            torso.localRotation = Quaternion.Euler(lean, -pelvisYaw * 1.6f, -pelvisRoll);
+            torso.localRotation = Quaternion.Euler(lean + kickTorsoPitch, -pelvisYaw * (1.6f - kickW * 1.2f), -pelvisRoll + kickTorsoRoll);
             head.localRotation = Quaternion.Euler(-lean * 0.5f, pelvisYaw * 0.6f, 0f); // eyes stay on the play
 
             // Arms swing opposite to the legs, bent at the elbow. Off balance or jockeying: arms out wide.
@@ -424,6 +560,11 @@ namespace NFWL
             float elbow = -20f - run * 65f;
             elbowL.localRotation = Quaternion.Euler(elbow + Mathf.Max(0f, legSignal) * 15f * run, 0f, 0f);
             elbowR.localRotation = Quaternion.Euler(elbow + Mathf.Max(0f, -legSignal) * 15f * run, 0f, 0f);
+            if (kickW > 0.01f && float.IsNaN(armOverrideL))
+            {
+                armL.localRotation = Quaternion.Slerp(armL.localRotation, Quaternion.Euler(kickArmL), kickW);
+                armR.localRotation = Quaternion.Slerp(armR.localRotation, Quaternion.Euler(kickArmR), kickW);
+            }
 
             // ---------- legs ----------
             FootReachError = 0f;
