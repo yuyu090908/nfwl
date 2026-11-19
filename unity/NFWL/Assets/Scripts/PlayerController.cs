@@ -197,7 +197,7 @@ namespace NFWL
                 ThinkAI();
             }
             kick.Tick(Time.time);
-            Move(Time.deltaTime);
+            if (Time.deltaTime > 0f) Move(Time.deltaTime); // paused (replay): nothing moves
 
             if (kickBuffered)
             {
@@ -616,6 +616,7 @@ namespace NFWL
             LastKickLabel = res.label;
             LastKickTime = Time.time;
             if (Match != null) Match.ShowKickLabel(this, res.label);
+            if (Match != null && strike.type == KickType.Shoot) Match.OnShot(this);
             // The intended receiver moves to meet the ball (AI players; the user steers his own).
             if (res.receiver != null && !res.receiver.IsHuman && res.receiveTime > 0f)
                 res.receiver.CallRun(res.receivePoint, Time.time + res.receiveTime + 0.4f);
@@ -886,7 +887,7 @@ namespace NFWL
         /// </summary>
         bool AIFirstTime()
         {
-            if (ball.Owner != null || kick.Active || Time.time < aiFirstTimeCheck) return false;
+            if (ball.Owner != null || kick.Active || Time.time < aiFirstTimeCheck || Match.ResetPending) return false;
             aiFirstTimeCheck = Time.time + 0.1f;
             PlayerController last = ball.LastTouchedBy;
             if (last == null || last == this || last.teamIndex != teamIndex) return false;

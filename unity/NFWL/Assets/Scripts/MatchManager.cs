@@ -27,9 +27,9 @@ namespace NFWL
 
         public int HomeScore { get; private set; }
         public int AwayScore { get; private set; }
-        public bool PlayersFrozen => fullTime;
+        public bool PlayersFrozen => fullTime || (replay != null && replay.Playing);
 
-        public const string Version = "NFWL Unity v0.6-dev  STEP 9";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 10";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -106,8 +106,30 @@ namespace NFWL
             cameraAnchor = new GameObject("CameraAnchor").transform;
             EnsureLighting();
             EnsureCamera();
+            // v0.6 presentation: replay recorder, procedural sound.
+            matchCam = Camera.main != null ? Camera.main.GetComponent<MatchCamera>() : null;
+            if (matchCam != null) matchCam.Ball = ball;
+            replay = gameObject.AddComponent<ReplaySystem>();
+            replay.Init(ball, all, matchCam);
+            sfx = SoundFX.Create(transform);
+            ball.Impact += (kind, speed) => sfx.OnBallImpact(kind, speed, ball.transform.position);
             ResetKickoff();
         }
+
+        MatchCamera matchCam;
+        ReplaySystem replay;
+        SoundFX sfx;
+        bool replayQueued;
+        float replayQueuedAt;
+        string replayTitle;
+        float replayFrom, replayTo, replaySpeed, replayYaw, replayPitch, replayDist;
+        PlayerController replaySubject;
+        float lastSaveReplay = -100f;
+        float goalTime;
+
+        /// <summary>True between a goal / out and the restart.</summary>
+        public bool ResetPending => resetPending;
+        public bool ReplayPlaying => replay != null && replay.Playing;
 
         IEnumerable<PlayerController> AllPlayers()
         {
@@ -299,6 +321,19 @@ namespace NFWL
 
         void Update()
         {
+            if (replay != null && replay.Playing)
+            {
+                // Any action key skips the replay.
+                if (KeyInput.Down(KeyCode.Space) || KeyInput.Down(KeyCode.J) || KeyInput.Down(KeyCode.K) || KeyInput.Down(KeyCode.L)
+                    || KeyInput.Down(KeyCode.Return) || KeyInput.Down(KeyCode.R)) replay.Stop();
+                return;
+            }
+            if (KeyInput.Down(KeyCode.M) && sfx != null) sfx.ToggleMute();
+            if (replayQueued && Time.time >= replayQueuedAt)
+            {
+                replayQueued = false;
+                StartQueuedReplay();
+            }
             if (KeyInput.Down(KeyCode.R))
             {
                 if (fullTime) RestartMatch(); else ResetKickoff();
@@ -316,6 +351,7 @@ namespace NFWL
             UpdateMarker();
 
             if (fullTime) return;
+            if (sfx != null) sfx.SetDanger(Danger());
             if (teamAI[0] != null && !resetPending)
             {
                 teamAI[0].Tick(ball, Time.time);
@@ -332,12 +368,14 @@ namespace NFWL
                     {
                         half = 2;
                         ShowEvent("HALF TIME", 2.5f);
+                        if (sfx != null) sfx.Whistle(true);
                         ScheduleReset(2.5f);
                     }
                     else
                     {
                         fullTime = true;
                         ShowEvent("FULL TIME", 9999f);
+                        if (sfx != null) sfx.Whistle(true);
                     }
                     return;
                 }
@@ -401,6 +439,81 @@ namespace NFWL
                 default: how = "SAVE"; break;
             }
             ShowKickLabel(keeper, $"{how} ({result})");
+            if (sfx != null) sfx.Ooh(keeper.transform.position);
+            // Save replay: only when the keeper holds a diving / high catch (play stops anyway), at most every 20 s.
+            bool spectacular = type == SaveType.DiveLeft || type == SaveType.DiveRight || type == SaveType.HighDive
+                               || type == SaveType.LowDive || type == SaveType.HighCatch;
+            if (result == "CATCH" && spectacular && Time.time - lastSaveReplay > 20f && !resetPending)
+            {
+                lastSaveReplay = Time.time;
+                float gx = -keeper.AttackSign * PitchDims.HalfLength;
+                QueueReplay("SAVE REPLAY", Time.time + 0.9f, Time.time - 1.6f, Time.time + 0.5f, 0.45f,
+                    Mathf.Sign(gx) * 90f, 16f, 7.5f, keeper);
+            }
+        }
+
+        /// <summary>A shot was struck (PlayerController): shot camera and crowd.</summary>
+        public void OnShot(PlayerController shooter)
+        {
+            if (matchCam != null) matchCam.ShotCam(shooter.AttackGoalCenter.x);
+            if (sfx != null) sfx.SetDanger(1f);
+        }
+
+        void QueueReplay(string title, float at, float from, float to, float speed, float yaw, float pitch, float dist, PlayerController subject)
+        {
+            replayQueued = true;
+            replayQueuedAt = at;
+            replayTitle = title;
+            replayFrom = from;
+            replayTo = to;
+            replaySpeed = speed;
+            replayYaw = yaw;
+            replayPitch = pitch;
+            replayDist = dist;
+            replaySubject = subject;
+        }
+
+        void StartQueuedReplay()
+        {
+            PlayerController subject = replaySubject;
+            Vector3 goal = new Vector3(Mathf.Sign(Mathf.Sin(replayYaw * Mathf.Deg2Rad)) * PitchDims.HalfLength, 0f, 0f);
+            replay.Play(replayTitle, replayFrom, Mathf.Min(replayTo, Time.time), replaySpeed, replayYaw, replayPitch, replayDist,
+                t =>
+                {
+                    Vector3 b = replay.BallAt(t);
+                    b.y = Mathf.Min(b.y, 1f);
+                    // Frame the ball with the goal (goal replay) or with the keeper (save replay).
+                    Vector3 other = subject != null ? subject.transform.position : goal;
+                    return Vector3.Lerp(b, other, 0.3f);
+                }, null);
+        }
+
+        /// <summary>The scorer runs off toward the corner; AI team-mates join him.</summary>
+        void Celebrate(PlayerController scorer)
+        {
+            float sx = Mathf.Sign(scorer.AttackSign);
+            float sz = scorer.transform.position.z >= 0f ? 1f : -1f;
+            Vector3 corner = new Vector3(sx * (PitchDims.HalfLength - 3f), 0f, sz * (PitchDims.HalfWidth - 3f));
+            float until = Time.time + goalResetDelay;
+            if (!scorer.IsHuman) scorer.CallRun(corner, until);
+            int k = 0;
+            foreach (PlayerController m in TeamList(scorer.teamIndex))
+            {
+                if (m == scorer || m.IsHuman || m.role == Role.GK) continue;
+                Vector3 offset = new Vector3(-sx * (1.5f + k), 0f, (k % 2 == 0 ? -1f : 1f) * 1.2f);
+                m.CallRun((scorer.IsHuman ? scorer.transform.position : corner) + offset, until);
+                k++;
+            }
+        }
+
+        /// <summary>How dangerous the play is right now (0..1): ball near a goal and moving at it.</summary>
+        float Danger()
+        {
+            Vector3 b = ball.transform.position;
+            float d = PitchDims.HalfLength - Mathf.Abs(b.x);
+            float near = Mathf.InverseLerp(16f, 4f, d) * Mathf.InverseLerp(10f, 3f, Mathf.Abs(b.z));
+            float toward = Mathf.Clamp01(ball.Velocity.x * Mathf.Sign(b.x) / 20f);
+            return Mathf.Clamp01(near * 0.7f + near * toward * 0.6f);
         }
 
         /// <summary>The ball hit a player's body (a block, a chest, a head).</summary>
@@ -465,8 +578,15 @@ namespace NFWL
             {
                 if (scorer.Model != null) scorer.Model.PlayCelebrate();
                 lastScorer = $"{scorer.displayName}  #{scorer.number}";
+                Celebrate(scorer);
             }
             else lastScorer = "";
+            if (sfx != null) { sfx.Goal(); sfx.Whistle(); }
+            // Goal replay: from behind and to the side of the goal, slowed down, after the first cheer.
+            goalTime = Time.time;
+            float gx = (homeScored ? 1f : -1f) * PitchDims.HalfLength;
+            QueueReplay("GOAL REPLAY", Time.time + 1.4f, goalTime - 4.2f, goalTime + 0.7f, 0.6f,
+                Mathf.Sign(gx) * 90f - Mathf.Sign(gx) * 38f, 20f, 10f, null);
             Debug.Log($"GOAL for {(homeScored ? "HOME" : "AWAY")}. Score {HomeScore} - {AwayScore}");
             ScheduleReset(goalResetDelay);
             kickoffTeam = homeScored ? 1 : 0;
@@ -476,6 +596,9 @@ namespace NFWL
         {
             // Restart from the centre for now. Kick-ins, corners and goal kicks come next (Full Spec 3.3).
             ShowEvent("OUT", outResetDelay);
+            // Just wide of a post: the crowd reacts.
+            Vector3 bp = ball.transform.position;
+            if (sfx != null && Mathf.Abs(bp.x) > PitchDims.HalfLength && Mathf.Abs(bp.z) < PitchDims.GoalHalfWidth + 3f) sfx.Ooh(bp);
             ScheduleReset(outResetDelay);
             PlayerController last = ball.LastTouchedBy;
             if (last != null) kickoffTeam = 1 - last.teamIndex;
@@ -523,6 +646,8 @@ namespace NFWL
             }
             if (kickoffTeam == 0) SetHuman(home[home.Count - 1]);
             if (teamAI[0] != null) { teamAI[0].Reset(); teamAI[1].Reset(); }
+            if (sfx != null) sfx.Whistle();
+            replayQueued = false;
             resetPending = false;
         }
 
@@ -588,14 +713,14 @@ namespace NFWL
             Label(new Rect(Screen.width - 260f, 14f, 244f, 20f), Version, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 1f, 1f, 0.6f), false);
             DrawMotionDebug();
             if (showAIDebug) DrawAIDebug();
-            DrawEvent();
+            if (ReplayPlaying) DrawReplayBadge(); else DrawEvent();
             DrawPlayerCard();
             DrawPowerGauge();
             if (Time.time < kickLabelUntil)
                 Label(new Rect(0f, Screen.height - 128f, Screen.width, 24f), kickLabel, bigStyle.WithSize(18), Gold);
 
             Label(new Rect(16f, Screen.height - 26f, Screen.width - 32f, 22f),
-                "WASD: move   Shift: sprint   J: pass (Alt+J through) / tackle   L: long (Alt+L lofted through)   K: shoot (Shift+K power, Alt+K finesse, Ctrl+K low)   Q: switch   Z: zoom   R: reset",
+                "WASD: move   Shift: sprint   J: pass (Alt+J through) / tackle   L: long (Alt+L lofted through)   K: shoot (Shift+K power, Alt+K finesse, Ctrl+K low)   Q: switch   Z: zoom   R: reset   M: sound   F1: AI roles",
                 smallStyle, new Color(1f, 1f, 1f, 0.85f));
             if (string.IsNullOrEmpty(KeyInput.LastKey))
             {
@@ -738,6 +863,18 @@ namespace NFWL
                 Label(new Rect(Screen.width - 420f, row, 404f, 20f), gkText, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 0.9f, 0.6f, 0.85f), false);
                 row += 18f;
             }
+        }
+
+        /// <summary>Broadcast-style replay overlay: letterbox bars, REPLAY tag, how to skip.</summary>
+        void DrawReplayBadge()
+        {
+            float bar = Screen.height * 0.07f;
+            Box(new Rect(0f, 0f, Screen.width, bar), new Color(0f, 0f, 0f, 0.85f));
+            Box(new Rect(0f, Screen.height - bar, Screen.width, bar), new Color(0f, 0f, 0f, 0.85f));
+            bool blink = Mathf.Repeat(Time.unscaledTime, 1f) < 0.6f;
+            Box(new Rect(24f, bar + 14f, 210f, 34f), new Color(Gold.r, Gold.g, Gold.b, 0.9f));
+            Label(new Rect(24f, bar + 14f, 210f, 34f), (blink ? "● " : "   ") + replay.Title, smallStyle.WithAlign(TextAnchor.MiddleCenter), Navy, false);
+            Label(new Rect(0f, Screen.height - bar + 8f, Screen.width, 24f), "Space / J / K / L : skip", smallStyle.WithAlign(TextAnchor.MiddleCenter), new Color(1f, 1f, 1f, 0.7f), false);
         }
 
         bool showAIDebug;

@@ -33,6 +33,11 @@ namespace NFWL
         const float ShinLength = 0.42f;   // knee to ankle
         const float AnkleHeight = 0.075f; // ankle above the sole
 
+        Transform[] animatedParts;
+        /// <summary>Every transform the procedural animation moves (for the replay recorder).</summary>
+        public Transform[] AnimatedParts => animatedParts ?? (animatedParts = new[]
+            { transform, body, hips, torso, head, legL, legR, kneeL, kneeR, ankleL, ankleR, armL, armR, elbowL, elbowR });
+
         /// <summary>The feet (planted / swinging), for touches, kicks and tests.</summary>
         public GaitController Gait => gait;
         /// <summary>How far a planted foot was out of the leg's reach last frame (m). ~0 = no sliding.</summary>
