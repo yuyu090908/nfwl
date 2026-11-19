@@ -29,7 +29,7 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime;
 
-        public const string Version = "NFWL Unity v0.6-dev  STEP 7";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 8";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -370,6 +370,25 @@ namespace NFWL
             if (shoulder && a.teamIndex != b.teamIndex && (a.HasBall || b.HasBall)) ShowKickLabel(a.HasBall ? b : a, "SHOULDER CHALLENGE");
         }
 
+        /// <summary>A goalkeeper got his hands to a shot (GoalkeeperController, PHASE 6.2).</summary>
+        public void OnSave(PlayerController keeper, SaveType type, string result)
+        {
+            ShowEvent("SAVE!", 1.0f);
+            string how;
+            switch (type)
+            {
+                case SaveType.HighDive: how = "FINGERTIP SAVE"; break;
+                case SaveType.LowDive: how = "LOW DIVING SAVE"; break;
+                case SaveType.DiveLeft:
+                case SaveType.DiveRight: how = "DIVING SAVE"; break;
+                case SaveType.HighCatch: how = "HIGH CATCH"; break;
+                case SaveType.LowCatch: how = "LOW CATCH"; break;
+                case SaveType.Punch: how = "PUNCHED CLEAR"; break;
+                default: how = "SAVE"; break;
+            }
+            ShowKickLabel(keeper, $"{how} ({result})");
+        }
+
         /// <summary>The ball hit a player's body (a block, a chest, a head).</summary>
         public void OnBodyContact(PlayerController p, string part, float speed)
         {
@@ -692,6 +711,17 @@ namespace NFWL
             else if (human.Kick.Active) text = $"KICK {human.Kick.Phase}   " + text;
             else if (human.HasBall) text = $"TOUCH {human.Dribble.LastKind}{(human.Dribble.Shielding ? " (SHIELD)" : "")}   " + text;
             Label(new Rect(Screen.width - 420f, 34f, 404f, 20f), text, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(0.6f, 1f, 0.8f, 0.8f), false);
+
+            // Keepers: last save decision (type, reachable or not, outcome) for a few seconds.
+            float row = 54f;
+            for (int i = 0; i < all.Count; i++)
+            {
+                GoalkeeperController gk = all[i].Keeper;
+                if (gk == null || Time.time - gk.LastResultTime > 3f) continue;
+                string gkText = $"GK {(all[i].teamIndex == 0 ? homeShort : awayShort)}  {gk.LastSave}  {(gk.LastPlanReachable ? "reachable" : "out of reach")}  {gk.LastResult}";
+                Label(new Rect(Screen.width - 420f, row, 404f, 20f), gkText, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(1f, 0.9f, 0.6f, 0.85f), false);
+                row += 18f;
+            }
         }
 
         void DrawPowerGauge()

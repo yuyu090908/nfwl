@@ -53,6 +53,8 @@ namespace NFWL
         public KickController Kick => kick;
         /// <summary>Standing tackle (v0.6 PHASE 5).</summary>
         public TackleController Tackle => tackle;
+        /// <summary>Goalkeeper positioning and saves (null for outfield players).</summary>
+        public GoalkeeperController Keeper => keeper;
         public float LastBumpTime { get; set; } = -10f;
         public PlayerController LastBumpWith { get; set; }
 
@@ -77,6 +79,7 @@ namespace NFWL
         DribbleController dribble;
         KickController kick;
         TackleController tackle;
+        GoalkeeperController keeper;
         Vector3 intendedVelocity;
         float aiTackleCheck;
         // Kick waiting for its contact (decided when the kick starts, struck at contact).
@@ -100,7 +103,6 @@ namespace NFWL
         public string LastKickLabel { get; private set; } = "";
         public float LastKickTime { get; private set; } = -10f;
         float noControlUntil;
-        float saveCooldownUntil;
 
         bool charging;
         KickType chargeType = KickType.ShortPass;
@@ -136,6 +138,7 @@ namespace NFWL
             PlayerController pc = go.AddComponent<PlayerController>();
             pc.teamIndex = team;
             pc.role = role;
+            if (role == Role.GK) pc.keeper = new GoalkeeperController(pc);
             pc.number = number;
             pc.displayName = name;
             pc.rarity = rarity;
@@ -288,6 +291,15 @@ namespace NFWL
         {
             // In the Editor, pick up tuning edits made in the Inspector during Play.
             if (Application.isEditor && Time.frameCount % 60 == 0) ApplyAttributes();
+            if (keeper != null && keeper.OverrideMove(Time.time, out Vector3 diveV))
+            {
+                // Diving / getting up: the body is launched, no running.
+                Vector3 b0 = transform.position;
+                controller.Move((diveV + Vector3.down * 2f) * dt);
+                if (dt > 0f) loco.SetActualVelocity((transform.position - b0) / dt);
+                intendedVelocity = diveV;
+                return;
+            }
             Vector3 dir = InputWorldDirection();
             LocomotionTuning lt = NFWLTuning.Current.locomotion;
 
@@ -655,6 +667,7 @@ namespace NFWL
             loco.Reset(rotation * Vector3.forward);
             kick.Cancel();
             tackle.Cancel();
+            keeper?.Cancel();
             if (Model != null) Model.CancelAllActions();
             charging = false;
             kickBuffered = false;
@@ -664,6 +677,13 @@ namespace NFWL
         {
             if (ball == null) return;
             if (Match != null && Match.PlayersFrozen) return;
+
+            // Goalkeeper: reads the shot, dives and resolves the save at the moment the hands get there.
+            if (keeper != null)
+            {
+                keeper.FixedTick(ball, Time.time);
+                if (keeper.Busy(Time.time) && !HasBall) return;
+            }
 
             // Tackle: the foot stabs at the ball and the result is decided at the contact moment.
             if (tackle.Active)
@@ -720,12 +740,8 @@ namespace NFWL
                     }
                     else if (dist2D < controlRadius && ballPos.y < maxHeight)
                     {
+                        // A keeper only gathers balls he is not already saving (GoalkeeperController decides those).
                         if (rel.magnitude < trapLimit) TakeBall();
-                        else if (role == Role.GK) TrySave(ballPos, ballVel);
-                    }
-                    else if (role == Role.GK && dist2D < 2.4f && ballPos.y < 2.4f)
-                    {
-                        TrySave(ballPos, ballVel);
                     }
                 }
             }
@@ -750,27 +766,6 @@ namespace NFWL
             // While a kick waits for the ball, no new touch pushes it away.
             if (!(kickBuffered && HasBall) && !kick.Active)
                 dribble.FixedTick(ball, InputWorldDirection(), Mathf.Min(1f, moveInput.magnitude), Sprinting, Time.time);
-        }
-
-        /// <summary>Goalkeeper: a dive that may push a fast shot away.</summary>
-        void TrySave(Vector3 ballPos, Vector3 ballVel)
-        {
-            if (Time.time < saveCooldownUntil) return;
-            // Only shots heading towards our own goal.
-            if (Mathf.Sign(ballVel.x) != -AttackSign || Mathf.Abs(ballVel.x) < 4f) return;
-            saveCooldownUntil = Time.time + 0.8f;
-
-            float side = Vector3.Dot(ballPos - transform.position, transform.right);
-            if (Model != null) Model.PlayDive(side);
-
-            float chance = Rules.AttrLerp(attributes.Goalkeeping, 0.35f, 0.8f);
-            if (Random.value < chance)
-            {
-                Vector3 v = new Vector3(-ballVel.x * 0.35f, Mathf.Abs(ballVel.y) * 0.3f + 2.5f, ballVel.z * 0.4f + Random.Range(-4f, 4f));
-                ball.Kick(v, this);
-                noControlUntil = Time.time + 0.4f;
-                if (Match != null) Match.ShowEvent("SAVE!", 1.0f);
-            }
         }
 
         // -------------------------------------------------------------------
@@ -873,9 +868,11 @@ namespace NFWL
                 MoveTowards(ballP, true); // come off the line for a loose ball in the box
                 return;
             }
-            float z = Mathf.Clamp(ballP.z * 0.35f, -1.2f, 1.2f);
-            float x = lineX + s * (0.7f + Mathf.Clamp01(1f - distToLine / 25f) * 0.8f);
-            MoveTowards(new Vector3(x, 0f, z), false);
+            // PHASE 6.1: stand on the angle bisector, off the line by distance, rush a 1 v 1.
+            Vector3 spot = keeper != null ? keeper.PositionTarget(ball) : new Vector3(lineX + s, 0f, Mathf.Clamp(ballP.z * 0.35f, -1.2f, 1.2f));
+            Vector3 toSpot = spot - transform.position;
+            toSpot.y = 0f;
+            MoveTowards(spot, toSpot.magnitude > 2.5f);
         }
 
         void ThinkWithBall()

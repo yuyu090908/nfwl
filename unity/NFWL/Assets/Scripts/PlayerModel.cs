@@ -17,8 +17,9 @@ namespace NFWL
 
         PlayerController owner;
         float kickTimer = -1f;
-        float diveTimer = -1f;
-        float diveSide = 1f;
+        // Goalkeeper save pose (PHASE 6): a timeline from GoalkeeperController.
+        SaveType saveType = SaveType.None;
+        float saveSide = 1f, saveHeight, saveStart, saveContact, saveEnd;
         float celebrateTimer = -1f;
         float lean;
         float heightScale = 1f;
@@ -249,6 +250,7 @@ namespace NFWL
             plantAction.active = false;
             kick = null;
             kickTimer = -1f;
+            saveType = SaveType.None;
         }
 
         /// <summary>Sole point, yaw and pitch of a foot that meets the ball with the given part.</summary>
@@ -468,7 +470,102 @@ namespace NFWL
         /// <summary>v0.5 compatibility: a quick kick swing with no timeline (kicks now use KickController).</summary>
         public void PlayKick() { kickTimer = 0f; }
 
-        public void PlayDive(float side) { diveTimer = 0f; diveSide = Mathf.Sign(side == 0f ? 1f : side); }
+        /// <summary>v0.5 compatibility: a sideways dive with a default timeline (side in local right).</summary>
+        public void PlayDive(float side)
+        {
+            float now = Time.time;
+            saveType = SaveType.DiveLeft;
+            saveSide = Mathf.Sign(side == 0f ? 1f : side);
+            saveHeight = 0.8f;
+            saveStart = now;
+            saveContact = now + 0.3f;
+            saveEnd = now + DiveTime;
+        }
+
+        /// <summary>
+        /// Goalkeeper save (PHASE 6.2): the pose builds up to the contact time, is held briefly, then the
+        /// keeper gets up by <paramref name="end"/>. <paramref name="worldSide"/> is the world-Z side of the
+        /// ball (+1 / -1), <paramref name="height"/> the ball height at contact.
+        /// </summary>
+        public void PlaySave(SaveType type, float worldSide, float height, float start, float contact, float end)
+        {
+            saveType = type;
+            Vector3 right = owner != null ? owner.transform.right : Vector3.right;
+            float local = Vector3.Dot(new Vector3(0f, 0f, worldSide), right);
+            saveSide = local >= 0f ? 1f : -1f;
+            saveHeight = height;
+            saveStart = start;
+            saveContact = Mathf.Max(contact, start + 0.05f);
+            saveEnd = Mathf.Max(end, saveContact + 0.1f);
+        }
+
+        /// <summary>The keeper is mid-dive (feet off the ground).</summary>
+        public bool SaveAirborne { get; private set; }
+
+        static bool IsDive(SaveType t) => t == SaveType.DiveLeft || t == SaveType.DiveRight || t == SaveType.LowDive
+                                          || t == SaveType.HighDive || t == SaveType.Parry || t == SaveType.Punch;
+
+        /// <summary>Body roll / offset, torso pitch, crouch and arm poses for the save at this moment.</summary>
+        void SavePose(float now, ref Quaternion bodyRot, ref Vector3 bodyPos, ref bool airborne,
+            out float torsoPitch, out float crouch, out bool armsOn, out Vector3 armLPose, out Vector3 armRPose, out float armW)
+        {
+            torsoPitch = 0f; crouch = 0f; armsOn = false; armLPose = armRPose = Vector3.zero; armW = 0f;
+            SaveAirborne = false;
+            if (saveType == SaveType.None) return;
+            if (now > saveEnd) { saveType = SaveType.None; return; }
+            if (now < saveStart) return;
+            // Build up to contact, hold a moment (the hands on the ball), then get up.
+            float hold = saveContact + 0.15f;
+            float w = now < saveContact ? Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(saveStart, saveContact, now))
+                    : now < hold ? 1f
+                    : 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(hold, saveEnd, now));
+            armsOn = true;
+            armW = Mathf.Clamp01(w * 1.4f);
+            float s = saveSide;
+            if (IsDive(saveType))
+            {
+                // Dive: launch sideways off the near foot, body flat out at full stretch.
+                float lift = saveType == SaveType.HighDive || saveType == SaveType.Punch ? 0.55f
+                           : saveType == SaveType.LowDive ? 0.05f
+                           : Mathf.Clamp(saveHeight * 0.35f, 0.15f, 0.45f);
+                float roll = saveType == SaveType.HighDive || saveType == SaveType.Punch ? 55f : saveType == SaveType.LowDive ? 85f : 72f;
+                // After the hold the body lands on its side before getting up.
+                float air = now < hold ? w : w * 0.35f;
+                bodyRot = Quaternion.Euler(0f, 0f, -s * roll * w);
+                bodyPos = new Vector3(s * 0.3f * w, lift * air, 0f);
+                // Both arms stretch toward the ball (up over the head = along the dive once the body rolls).
+                float reach = saveType == SaveType.Punch ? 175f : 160f;
+                armLPose = new Vector3(-20f, 0f, -reach);
+                armRPose = new Vector3(-20f, 0f, reach);
+                torsoPitch = -5f;
+                airborne = w > 0.1f;
+                SaveAirborne = airborne && now < hold;
+            }
+            else if (saveType == SaveType.HighCatch)
+            {
+                // Spring up with the hands above the head, a little in front.
+                bodyPos = new Vector3(0f, Mathf.Clamp(saveHeight - 1.9f, 0f, 0.45f) * w, 0f);
+                armLPose = new Vector3(-155f, 0f, -12f);
+                armRPose = new Vector3(-155f, 0f, 12f);
+                airborne = bodyPos.y > 0.05f;
+                SaveAirborne = airborne;
+            }
+            else if (saveType == SaveType.LowCatch)
+            {
+                // Get down behind the ball: knees bend, chest over it, hands scoop under.
+                crouch = 0.22f * w;
+                torsoPitch = 38f * w;
+                armLPose = new Vector3(-45f, 0f, -8f);
+                armRPose = new Vector3(-45f, 0f, 8f);
+            }
+            else
+            {
+                // Standing catch: arms forward at chest height to take the ball into the body.
+                torsoPitch = 10f * w;
+                armLPose = new Vector3(-85f + Mathf.Clamp(saveHeight - 1.2f, -0.6f, 0.6f) * -60f, 0f, -10f);
+                armRPose = new Vector3(armLPose.x, 0f, 10f);
+            }
+        }
 
         public void PlayCelebrate() { celebrateTimer = 0f; }
 
@@ -506,21 +603,9 @@ namespace NFWL
             bool airborne = false;
             float armOverrideL = float.NaN, armOverrideR = float.NaN;
 
-            if (diveTimer >= 0f)
-            {
-                diveTimer += dt;
-                float d = diveTimer / DiveTime;
-                if (d >= 1f) diveTimer = -1f;
-                else
-                {
-                    float w = d < 0.3f ? d / 0.3f : 1f - Mathf.Clamp01((d - 0.6f) / 0.4f);
-                    bodyRot = Quaternion.Euler(0f, 0f, -diveSide * 75f * w);
-                    bodyPos = new Vector3(diveSide * 0.6f * w, 0.25f * w, 0f);
-                    armOverrideL = -150f * w;
-                    armOverrideR = 150f * w;
-                    airborne = w > 0.1f;
-                }
-            }
+            float now = Time.time;
+            SavePose(now, ref bodyRot, ref bodyPos, ref airborne, out float saveTorso, out float saveCrouch,
+                out bool saveArms, out Vector3 saveArmL, out Vector3 saveArmR, out float saveArmW);
             if (celebrateTimer >= 0f)
             {
                 celebrateTimer += dt;
@@ -539,7 +624,6 @@ namespace NFWL
 
             // ---------- feet (gait with foot locking) ----------
             bool kicking = kickTimer >= 0f;
-            float now = Time.time;
             bool actionOn = action.active && now >= action.start && now < action.end;
             bool plantOn = plantAction.active && now >= plantAction.start && now < plantAction.end;
             bool actionLeft = actionOn && action.side < 0f;
@@ -578,7 +662,7 @@ namespace NFWL
             float bob = Mathf.Cos(gait.Phase * Mathf.PI * 4f - gait.StanceFraction * Mathf.PI * 2f) * 0.035f * run;
             float lunge = LungeWeight(now);
             float crouchDrop = crouch ? 0.1f : st == LocoState.SharpTurn ? 0.07f : st == LocoState.Recovery ? 0.05f : 0f;
-            crouchDrop = Mathf.Max(crouchDrop, lunge * 0.16f);
+            crouchDrop = Mathf.Max(crouchDrop, Mathf.Max(lunge * 0.16f, saveCrouch));
             // Pelvis twists toward the leg that swings forward; shoulders twist the other way.
             float legSignal = LegForwardSignal();
             float pelvisYaw = legSignal * 9f * run * (1f - kickW) + kickPelvisYaw;
@@ -596,7 +680,7 @@ namespace NFWL
 
             // ---------- upper body ----------
             lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 14f : 0f), 1f - Mathf.Exp(-14f * dt));
-            torso.localRotation = Quaternion.Euler(lean + kickTorsoPitch + chestLean + lunge * 18f, -pelvisYaw * (1.6f - kickW * 1.2f), -pelvisRoll + kickTorsoRoll);
+            torso.localRotation = Quaternion.Euler(lean + kickTorsoPitch + chestLean + lunge * 18f + saveTorso, -pelvisYaw * (1.6f - kickW * 1.2f), -pelvisRoll + kickTorsoRoll);
             head.localRotation = Quaternion.Euler(-lean * 0.5f, pelvisYaw * 0.6f, 0f); // eyes stay on the play
 
             // Arms swing opposite to the legs, bent at the elbow. Off balance or jockeying: arms out wide.
@@ -611,6 +695,13 @@ namespace NFWL
             {
                 armL.localRotation = Quaternion.Slerp(armL.localRotation, Quaternion.Euler(kickArmL), kickW);
                 armR.localRotation = Quaternion.Slerp(armR.localRotation, Quaternion.Euler(kickArmR), kickW);
+            }
+            if (saveArms && saveArmW > 0.01f)
+            {
+                armL.localRotation = Quaternion.Slerp(armL.localRotation, Quaternion.Euler(saveArmL), saveArmW);
+                armR.localRotation = Quaternion.Slerp(armR.localRotation, Quaternion.Euler(saveArmR), saveArmW);
+                elbowL.localRotation = Quaternion.Slerp(elbowL.localRotation, Quaternion.Euler(-10f, 0f, 0f), saveArmW);
+                elbowR.localRotation = Quaternion.Slerp(elbowR.localRotation, Quaternion.Euler(-10f, 0f, 0f), saveArmW);
             }
 
             // ---------- legs ----------
