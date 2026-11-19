@@ -472,6 +472,17 @@ namespace NFWL
 
         public void PlayCelebrate() { celebrateTimer = 0f; }
 
+        float lungeStart = -1f, lungeContact, lungeEnd;
+        /// <summary>Standing tackle: drop the hips and stretch toward the ball, then recover.</summary>
+        public void PlayLunge(float start, float contact, float end) { lungeStart = start; lungeContact = contact; lungeEnd = end; }
+
+        float LungeWeight(float now)
+        {
+            if (lungeStart < 0f || now > lungeEnd) return 0f;
+            if (now < lungeContact) return Mathf.InverseLerp(lungeStart, lungeContact, now);
+            return 1f - Mathf.InverseLerp(lungeContact, lungeEnd, now);
+        }
+
         float chestTimer = -1f;
         /// <summary>Chest control: lean back and cushion the ball.</summary>
         public void PlayChest() { chestTimer = 0f; }
@@ -490,7 +501,7 @@ namespace NFWL
             bool crouch = st == LocoState.Jockey || st == LocoState.SideStep || st == LocoState.Backpedal;
 
             // ---------- full-body overrides (dive, celebration) ----------
-            Quaternion bodyRot = Quaternion.Euler(0f, 0f, lc.LeanRoll); // lean into curves from the feet
+            Quaternion bodyRot = Quaternion.Euler(0f, 0f, lc.LeanRoll + lc.SwayRoll); // lean into curves, sway from bumps
             Vector3 bodyPos = Vector3.zero;
             bool airborne = false;
             float armOverrideL = float.NaN, armOverrideR = float.NaN;
@@ -565,7 +576,9 @@ namespace NFWL
             // ---------- pelvis: height, bob, twist ----------
             // Bob: lowest at mid-stance, twice per cycle.
             float bob = Mathf.Cos(gait.Phase * Mathf.PI * 4f - gait.StanceFraction * Mathf.PI * 2f) * 0.035f * run;
+            float lunge = LungeWeight(now);
             float crouchDrop = crouch ? 0.1f : st == LocoState.SharpTurn ? 0.07f : st == LocoState.Recovery ? 0.05f : 0f;
+            crouchDrop = Mathf.Max(crouchDrop, lunge * 0.16f);
             // Pelvis twists toward the leg that swings forward; shoulders twist the other way.
             float legSignal = LegForwardSignal();
             float pelvisYaw = legSignal * 9f * run * (1f - kickW) + kickPelvisYaw;
@@ -583,7 +596,7 @@ namespace NFWL
 
             // ---------- upper body ----------
             lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 14f : 0f), 1f - Mathf.Exp(-14f * dt));
-            torso.localRotation = Quaternion.Euler(lean + kickTorsoPitch + chestLean, -pelvisYaw * (1.6f - kickW * 1.2f), -pelvisRoll + kickTorsoRoll);
+            torso.localRotation = Quaternion.Euler(lean + kickTorsoPitch + chestLean + lunge * 18f, -pelvisYaw * (1.6f - kickW * 1.2f), -pelvisRoll + kickTorsoRoll);
             head.localRotation = Quaternion.Euler(-lean * 0.5f, pelvisYaw * 0.6f, 0f); // eyes stay on the play
 
             // Arms swing opposite to the legs, bent at the elbow. Off balance or jockeying: arms out wide.

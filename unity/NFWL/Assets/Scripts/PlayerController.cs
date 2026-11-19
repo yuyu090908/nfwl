@@ -26,7 +26,6 @@ namespace NFWL
         [Header("Dribble (Full Spec 3.6 / 3.7)")]
         public float controlRadius = 0.9f;
         public float maxTrapRelativeSpeed = 18f;
-        public float tackleRadius = 1.0f;
 
         [Header("Kick")]
         public float kickCooldown = 0.35f;
@@ -52,6 +51,17 @@ namespace NFWL
         public DribbleController Dribble => dribble;
         /// <summary>Kick timeline (v0.6 PHASE 3).</summary>
         public KickController Kick => kick;
+        /// <summary>Standing tackle (v0.6 PHASE 5).</summary>
+        public TackleController Tackle => tackle;
+        public float LastBumpTime { get; set; } = -10f;
+        public PlayerController LastBumpWith { get; set; }
+
+        /// <summary>Wins the ball (a tackle that reached it).</summary>
+        public void GainBall()
+        {
+            if (ball == null || HasBall) return;
+            TakeBall();
+        }
 
         /// <summary>Error multiplier for a foot (side -1 left, +1 right): 1 on the preferred foot, more on the weak foot.</summary>
         public float WeakFootFactor(float side)
@@ -66,6 +76,9 @@ namespace NFWL
         readonly PlayerLocomotion loco = new PlayerLocomotion();
         DribbleController dribble;
         KickController kick;
+        TackleController tackle;
+        Vector3 intendedVelocity;
+        float aiTackleCheck;
         // Kick waiting for its contact (decided when the kick starts, struck at contact).
         KickRequest strike;
         float chestCooldownUntil;
@@ -143,6 +156,7 @@ namespace NFWL
             controller = GetComponent<CharacterController>();
             dribble = new DribbleController(this);
             kick = new KickController(this);
+            tackle = new TackleController(this);
             ApplyAttributes();
         }
 
@@ -209,7 +223,12 @@ namespace NFWL
 
             Sprinting = KeyInput.Get(sprintKey) || KeyInput.Get(KeyCode.RightShift);
 
-            HandleKickKey(shortPassKey, KickType.ShortPass);
+            if (KeyInput.Down(shortPassKey) && !HasBall && OpponentCarrierNear(2.6f))
+            {
+                // Defending: J is a standing tackle.
+                tackle.Begin(ball, Time.time);
+            }
+            else HandleKickKey(shortPassKey, KickType.ShortPass);
             HandleKickKey(longPassKey, KickType.LongPass);
             HandleKickKey(shootKey, KickType.Shoot);
         }
@@ -239,6 +258,15 @@ namespace NFWL
             bool shift = KeyInput.Get(it.powerModifier) || KeyInput.Get(KeyCode.RightShift);
             if (shift && KeyInput.ShiftDownTime >= chargeStartTime - it.powerShiftWindow) return KickVariant.Power;
             return KickVariant.Normal;
+        }
+
+        /// <summary>An opponent has the ball within dist of this player.</summary>
+        bool OpponentCarrierNear(float dist)
+        {
+            if (ball == null || ball.Owner == null || ball.Owner.teamIndex == teamIndex) return false;
+            Vector3 d = ball.Body.position - transform.position;
+            d.y = 0f;
+            return d.magnitude < dist;
         }
 
         /// <summary>Called when the user takes over another player.</summary>
@@ -271,10 +299,15 @@ namespace NFWL
                 hasBall = HasBall,
                 speedScale = (charging && chargeType == KickType.Shoot ? 0.7f : 1f) // Full Spec 3.6.2
                              * kick.SpeedScale(Time.time)
+                             * (tackle.Active ? 0.6f : 1f)
             };
 
             PlayerController carrier = ball != null ? ball.Owner : null;
-            if (kick.Active && Time.time < kick.FollowEndTime)
+            if (tackle.Active)
+            {
+                input.faceDir = tackle.Direction;
+            }
+            else if (kick.Active && Time.time < kick.FollowEndTime)
             {
                 // Square up to the target while striking (the body turns at its normal rate, no snap).
                 input.faceDir = kick.Direction;
@@ -311,6 +344,7 @@ namespace NFWL
 
             loco.Tick(input, dt);
 
+            intendedVelocity = loco.Velocity;
             Vector3 before = transform.position;
             controller.Move((loco.Velocity + Vector3.down * 2f) * dt);
             // Use the real displacement, so bumping into someone slows you down.
@@ -327,6 +361,14 @@ namespace NFWL
                 transform.position = p;
                 controller.enabled = true;
             }
+        }
+
+        /// <summary>Player-to-player bumps (PHASE 5.3): the controller reports who we ran into.</summary>
+        void OnControllerColliderHit(ControllerColliderHit hit)
+        {
+            if (!(hit.collider is CharacterController)) return;
+            PlayerController other = hit.collider.GetComponent<PlayerController>();
+            if (other != null) PlayerContacts.Resolve(this, other, intendedVelocity, Time.time);
         }
 
         // -------------------------------------------------------------------
@@ -612,6 +654,7 @@ namespace NFWL
             controller.enabled = true;
             loco.Reset(rotation * Vector3.forward);
             kick.Cancel();
+            tackle.Cancel();
             if (Model != null) Model.CancelAllActions();
             charging = false;
             kickBuffered = false;
@@ -621,6 +664,13 @@ namespace NFWL
         {
             if (ball == null) return;
             if (Match != null && Match.PlayersFrozen) return;
+
+            // Tackle: the foot stabs at the ball and the result is decided at the contact moment.
+            if (tackle.Active)
+            {
+                tackle.TrackBall(ball, Time.time);
+                tackle.FixedTick(ball, Time.time);
+            }
 
             // Kick timeline: aim the foot at the moving ball and strike it in the contact step.
             if (kick.BeforeContact)
@@ -647,14 +697,8 @@ namespace NFWL
                 PlayerController owner = ball.Owner;
                 if (owner != null)
                 {
-                    // Tackle: an opponent close to the ball can win it. Goalkeepers holding the ball are safe.
-                    if (owner.teamIndex != teamIndex && owner.role != Role.GK && dist2D < tackleRadius && ballPos.y < 0.8f)
-                    {
-                        float rate = Rules.AttrLerp(attributes.Tackling, 0.9f, 2.6f)
-                                     / Rules.AttrLerp(owner.attributes.BallControl, 0.8f, 1.4f);
-                        if (owner.Sprinting) rate *= 1.4f;
-                        if (Random.value < rate * Time.fixedDeltaTime) TakeBall();
-                    }
+                    // v0.6: no automatic steal. Opponents win the ball with a tackle action
+                    // (TackleController) that must actually reach it.
                 }
                 else
                 {
@@ -767,7 +811,26 @@ namespace NFWL
             bool teamHasBall = ball.Owner != null && ball.Owner.teamIndex == teamIndex;
             if (!teamHasBall && Match.ChaserFor(teamIndex) == this)
             {
+                PlayerController carrier = ball.Owner;
                 Vector3 target = ballP + ball.Velocity * 0.25f;
+                if (carrier != null)
+                {
+                    // Close down goal-side of the ball, then pick a moment to tackle.
+                    Vector3 toGoal = OwnGoalCenter - ballP;
+                    toGoal.y = 0f;
+                    Vector3 toBall = ballP - transform.position;
+                    toBall.y = 0f;
+                    float d = toBall.magnitude;
+                    if (d < 4f) target = ballP + toGoal.normalized * 0.7f;
+                    if (d < 1.2f && Time.time >= aiTackleCheck && tackle.Ready(Time.time))
+                    {
+                        aiTackleCheck = Time.time + 0.25f;
+                        Vector3 exposed = ballP - carrier.transform.position;
+                        exposed.y = 0f;
+                        float chance = 0.25f + 0.5f * Mathf.Clamp01((exposed.magnitude - 0.35f) / 0.6f);
+                        if (Random.value < chance) tackle.Begin(ball, Time.time);
+                    }
+                }
                 MoveTowards(target, true);
                 return;
             }

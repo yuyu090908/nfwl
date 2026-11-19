@@ -29,7 +29,7 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime;
 
-        public const string Version = "NFWL Unity v0.6-dev  STEP 6";
+        public const string Version = "NFWL Unity v0.6-dev  STEP 7";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -364,6 +364,12 @@ namespace NFWL
             kickLabelUntil = Time.time + 1.6f;
         }
 
+        /// <summary>Two players bumped (shoulder challenge or collision).</summary>
+        public void OnPlayerContact(PlayerController a, PlayerController b, float impulse, bool shoulder)
+        {
+            if (shoulder && a.teamIndex != b.teamIndex && (a.HasBall || b.HasBall)) ShowKickLabel(a.HasBall ? b : a, "SHOULDER CHALLENGE");
+        }
+
         /// <summary>The ball hit a player's body (a block, a chest, a head).</summary>
         public void OnBodyContact(PlayerController p, string part, float speed)
         {
@@ -554,7 +560,7 @@ namespace NFWL
                 Label(new Rect(0f, Screen.height - 128f, Screen.width, 24f), kickLabel, bigStyle.WithSize(18), Gold);
 
             Label(new Rect(16f, Screen.height - 26f, Screen.width - 32f, 22f),
-                "WASD: move   Shift: sprint   J: pass (Alt+J through)   L: long (Alt+L lofted through)   K: shoot (Shift+K power, Alt+K finesse, Ctrl+K low)   Q: switch   Z: zoom   R: reset",
+                "WASD: move   Shift: sprint   J: pass (Alt+J through) / tackle   L: long (Alt+L lofted through)   K: shoot (Shift+K power, Alt+K finesse, Ctrl+K low)   Q: switch   Z: zoom   R: reset",
                 smallStyle, new Color(1f, 1f, 1f, 0.85f));
             if (string.IsNullOrEmpty(KeyInput.LastKey))
             {
@@ -681,7 +687,9 @@ namespace NFWL
             PlayerLocomotion lc = human.Locomotion;
             float slipCm = human.Model != null ? human.Model.FootReachError * 100f : 0f;
             string text = $"{lc.State}  {lc.Speed:0.0} m/s  lean {lc.LeanPitch:0}/{lc.LeanRoll:0}  bal {lc.Balance:0.00}  foot {slipCm:0.0}cm";
-            if (human.Kick.Active) text = $"KICK {human.Kick.Phase}   " + text;
+            if (human.Tackle.Active || Time.time - human.Tackle.ContactTime < 1f)
+                text = $"TACKLE {(human.Tackle.Active && Time.time < human.Tackle.ContactTime ? "..." : human.Tackle.LastResult)}   " + text;
+            else if (human.Kick.Active) text = $"KICK {human.Kick.Phase}   " + text;
             else if (human.HasBall) text = $"TOUCH {human.Dribble.LastKind}{(human.Dribble.Shielding ? " (SHIELD)" : "")}   " + text;
             Label(new Rect(Screen.width - 420f, 34f, 404f, 20f), text, smallStyle.WithAlign(TextAnchor.UpperRight), new Color(0.6f, 1f, 0.8f, 0.8f), false);
         }

@@ -52,6 +52,8 @@ namespace NFWL
         public float LeanPitch { get; private set; }
         /// <summary>Whole-body lean in degrees around the facing axis (Unity Z): + = to the left.</summary>
         public float LeanRoll { get; private set; }
+        /// <summary>Sideways sway from bumps (deg, same sign as LeanRoll), springs back.</summary>
+        public float SwayRoll { get; private set; }
         /// <summary>Smoothed acceleration in body space (x right, z forward), m/s^2.</summary>
         public Vector3 LocalAccel { get; private set; }
         /// <summary>Velocity in body space (x right, z forward).</summary>
@@ -75,6 +77,7 @@ namespace NFWL
         bool inSharpTurn;
         Vector3 accelSmoothed;
         float inertia, inertiaVel; // upper-body inertia spring (deg)
+        float sway, swayVel;       // sideways sway from contacts (deg)
 
         public void Configure(PlayerAttributes a, LocomotionTuning t)
         {
@@ -97,6 +100,7 @@ namespace NFWL
             Balance = 1f;
             accelSmoothed = Vector3.zero;
             inertia = inertiaVel = 0f;
+            sway = swayVel = 0f;
             LeanPitch = LeanRoll = 0f;
             inSharpTurn = false;
         }
@@ -109,6 +113,21 @@ namespace NFWL
         {
             v.y = 0f;
             Velocity = v;
+        }
+
+        /// <summary>
+        /// A bump from another player (PHASE 5.3): changes the velocity a little and sways the upper
+        /// body away from the hit. localPush is in body space (x right, z forward), in m/s.
+        /// </summary>
+        public void Push(Vector3 worldDeltaV, float balanceLoss)
+        {
+            worldDeltaV.y = 0f;
+            Velocity += worldDeltaV;
+            Vector3 local = Quaternion.Euler(0f, -facingYaw, 0f) * worldDeltaV;
+            // Pushed to the right = body tips right (negative roll); pushed back = upper body jerks back.
+            swayVel += -local.x * 70f;
+            inertiaVel += -local.z * 45f;
+            LoseBalance(balanceLoss);
         }
 
         /// <summary>Knocks the player off balance (0..1), e.g. a hard turn or a shoulder charge.</summary>
@@ -249,7 +268,12 @@ namespace NFWL
             LeanPitch = Mathf.Clamp(pitchActive + inertia + stumble, -10f, tune.maxLean);
             // Lean into curves (centripetal acceleration to the right = lean right = negative Z).
             float rollTarget = Mathf.Clamp(-la.x * tune.accelLean * 0.8f, -tune.maxLean, tune.maxLean);
+            float swayAcc = 80f * (0f - sway) - 2f * 0.5f * 9f * swayVel;
+            swayVel += swayAcc * dt;
+            sway += swayVel * dt;
+            sway = Mathf.Clamp(sway, -25f, 25f);
             LeanRoll = Mathf.Lerp(LeanRoll, rollTarget, 1f - Mathf.Exp(-10f * dt));
+            SwayRoll = sway;
 
             State = Classify(input, moving, strafing, sharpNow, s, top, la);
         }
