@@ -44,6 +44,11 @@ namespace NFWL
         public bool Moving { get; private set; }
         /// <summary>0 standing .. 1 sprinting, for arm swing and bob.</summary>
         public float RunAmount { get; private set; }
+        /// <summary>Taking short braking steps (v0.6 Real Football Engine).</summary>
+        public bool Braking { get; private set; }
+        /// <summary>Stride length (m per step) this frame, for the debug view and tests.</summary>
+        public float StrideLength => CycleHz > 0.01f && Moving ? lastSpeed / (2f * CycleHz) : 0f;
+        float lastSpeed;
 
         float cycles; // gait clock without wrapping, so each foot lifts once per cycle
         float scale = 1f;
@@ -83,7 +88,10 @@ namespace NFWL
         /// <param name="vel">Ground velocity.</param>
         /// <param name="yaw">Body facing in degrees.</param>
         /// <param name="stanceWidth">1 = normal, more for a wide defensive stance.</param>
-        public void Tick(Vector3 root, Vector3 vel, float yaw, float dt, float bodyScale, float stanceWidth, bool pivoting)
+        /// <param name="forwardAccel">Forward acceleration in body space (m/s^2): + starting, - braking.</param>
+        /// <param name="hasBall">Dribbling: slightly shorter, quicker steps.</param>
+        public void Tick(Vector3 root, Vector3 vel, float yaw, float dt, float bodyScale, float stanceWidth, bool pivoting,
+            float forwardAccel = 0f, bool hasBall = false)
         {
             if (!initialised || (root - lastRoot).sqrMagnitude > 2.25f || Mathf.Abs(bodyScale - scale) > 0.001f)
             {
@@ -92,14 +100,24 @@ namespace NFWL
             lastRoot = root;
             vel.y = 0f;
             float speed = vel.magnitude;
+            lastSpeed = speed;
 
-            // Cadence (full cycles per second) and stance share by speed: walk ~1 Hz / 62 %, sprint ~1.9 Hz / 26 %.
-            CycleHz = 0.75f + 0.17f * speed;
+            // Cadence (full cycles per second) and stance share by speed: walk ~1 Hz / 62 %, 8.5 m/s ~2.2 Hz / 30 %.
+            // Stride length = speed / cadence, so the steps always match the ground speed (stride warping).
+            float baseHz = 0.75f + 0.17f * speed;
+            // v0.6 Real Football Engine: first steps are short and quick (strong push, low speed);
+            // braking uses several short, choppy steps; with the ball the steps are a little shorter.
+            float startBoost = 0.4f * Mathf.Clamp01(forwardAccel / 7f) * Mathf.Clamp01(1f - speed / 8f);
+            float brakeBoost = 0.45f * Mathf.Clamp01(-forwardAccel / 7f) * Mathf.Clamp01(speed / 2f);
+            float targetHz = baseHz + startBoost + brakeBoost + (hasBall ? 0.12f : 0f);
+            // Smooth the cadence so a sudden brake does not jump the gait clock.
+            CycleHz = CycleHz <= 0f ? targetHz : Mathf.Lerp(CycleHz, targetHz, 1f - Mathf.Exp(-8f * dt));
+            Braking = brakeBoost > 0.1f;
             // Stance share chosen so the body travels about 0.8 m over a planted foot (what a leg of this
             // length can cover with a little knee flex), less in a wide defensive stance.
             float contactLength = 0.8f * scale * (stanceWidth > 1.2f ? 0.7f : 1f);
             StanceFraction = Mathf.Clamp(contactLength * CycleHz / Mathf.Max(0.1f, speed), 0.22f, 0.62f);
-            RunAmount = Mathf.Lerp(RunAmount, Mathf.Clamp01(speed / 6.5f), 1f - Mathf.Exp(-10f * dt));
+            RunAmount = Mathf.Lerp(RunAmount, Mathf.Clamp01(speed / 8f), 1f - Mathf.Exp(-10f * dt));
 
             bool wantMove = speed > 0.35f;
             if (wantMove && !Moving)

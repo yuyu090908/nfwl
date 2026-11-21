@@ -47,6 +47,8 @@ namespace NFWL
         public Vector3 Velocity => loco.Velocity;
         /// <summary>Movement with momentum, body facing and balance (v0.6 PHASE 1).</summary>
         public PlayerLocomotion Locomotion => loco;
+        /// <summary>Buffered presses and the recent movement direction (v0.6 Real Football Engine, Phase 1).</summary>
+        public InputBuffer Buffer => inputBuffer;
         public PlayerModel Model { get; private set; }
         public MatchManager Match { get; set; }
         public float AttackSign => teamIndex == 0 ? 1f : -1f;
@@ -91,6 +93,7 @@ namespace NFWL
         Ball ball;
         Vector2 moveInput;
         readonly PlayerLocomotion loco = new PlayerLocomotion();
+        readonly InputBuffer inputBuffer = new InputBuffer();
         DribbleController dribble;
         KickController kick;
         TackleController tackle;
@@ -219,6 +222,7 @@ namespace NFWL
             if (kickBuffered)
             {
                 if (Time.time > bufferedUntil) kickBuffered = false;
+                else if (kick.Active) { } // still striking the previous kick: keep the press until it ends
                 else if (HasBall && BallInKickReach())
                 {
                     kickBuffered = false;
@@ -239,15 +243,29 @@ namespace NFWL
             if (KeyInput.Get(KeyCode.W) || KeyInput.Get(KeyCode.UpArrow)) y += 1f;
             if (KeyInput.Get(KeyCode.S) || KeyInput.Get(KeyCode.DownArrow)) y -= 1f;
             moveInput = Vector2.ClampMagnitude(new Vector2(x, y), 1f);
+            InputTuning it = NFWLTuning.Current.input;
+            inputBuffer.RecordMove(InputWorldDirection(), Time.time);
 
             Sprinting = KeyInput.Get(sprintKey) || KeyInput.Get(KeyCode.RightShift);
 
-            if (KeyInput.Down(shortPassKey) && !HasBall && OpponentCarrierNear(2.6f))
+            bool defending = !HasBall && ball != null && ball.Owner != null && ball.Owner.teamIndex != teamIndex;
+            if (KeyInput.Down(shortPassKey) && !HasBall && OpponentCarrierNear(2.6f) && tackle.Begin(ball, Time.time))
             {
                 // Defending: J is a standing tackle.
-                tackle.Begin(ball, Time.time);
+                inputBuffer.Clear(BufferedAction.Tackle);
             }
-            else HandleKickKey(shortPassKey, KickType.ShortPass);
+            else
+            {
+                // J a little too early (out of reach, or the last tackle still recovering): keep it for a moment.
+                if (KeyInput.Down(shortPassKey) && defending) inputBuffer.Press(BufferedAction.Tackle, Time.time);
+                HandleKickKey(shortPassKey, KickType.ShortPass);
+            }
+            if (defending && inputBuffer.Has(BufferedAction.Tackle, Time.time, it.tackleBufferSeconds)
+                && OpponentCarrierNear(2.6f) && tackle.Ready(Time.time) && tackle.Begin(ball, Time.time))
+            {
+                inputBuffer.Clear(BufferedAction.Tackle);
+                charging = false; // the press became a tackle, not a pass
+            }
             HandleKickKey(longPassKey, KickType.LongPass);
             HandleKickKey(shootKey, KickType.Shoot);
         }
@@ -294,7 +312,11 @@ namespace NFWL
             charging = false;
             kickBuffered = false;
             moveInput = Vector2.zero;
+            inputBuffer.ClearAll();
         }
+
+        /// <summary>Direction the user pushed most recently (kept a short time after the keys are let go), or zero.</summary>
+        public Vector3 RecentMoveDir => inputBuffer.RecentMoveDir(Time.time, NFWLTuning.Current.input.moveDirMemorySeconds);
 
         /// <summary>W = +Z (up the screen), D = +X (right), matching the side-on camera.</summary>
         Vector3 InputWorldDirection()
@@ -429,6 +451,18 @@ namespace NFWL
         /// </summary>
         void RequestKick(KickType type, float power, bool tap, Vector3? aim, KickVariant variant = KickVariant.Normal)
         {
+            if (kick.Active)
+            {
+                // Pressed while the previous kick is still playing: keep it until that kick has finished.
+                kickBuffered = true;
+                bufferedType = type;
+                bufferedVariant = variant;
+                bufferedPower = power;
+                bufferedTap = tap;
+                bufferedAim = aim;
+                bufferedUntil = Mathf.Max(Time.time, kick.RecoverEndTime) + NFWLTuning.Current.input.kickBusyBufferSeconds;
+                return;
+            }
             if (HasBall && BallInKickReach())
             {
                 PerformKick(type, power, tap, aim, variant);
@@ -805,9 +839,13 @@ namespace NFWL
                 return;
             }
             Vector3 n = d / dist;
-            float mag = Mathf.Clamp(dist / 1.5f, 0.3f, 1f);
+            // Arrive without overshooting: run no faster than the speed from which the player can still stop
+            // before the target (braking takes metres now, v0.6 Real Football Engine).
+            bool sprintNow = sprint && dist > 3f;
+            float top = Mathf.Max(0.5f, loco.TopSpeed(sprintNow, HasBall));
+            float mag = Mathf.Clamp(loco.ArrivalSpeed(dist - 0.3f) / top, 0.2f, 1f);
             moveInput = new Vector2(n.x, n.z) * mag;
-            Sprinting = sprint && dist > 3f;
+            Sprinting = sprintNow;
         }
 
         void ThinkAI()
