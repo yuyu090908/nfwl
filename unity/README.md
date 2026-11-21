@@ -40,6 +40,7 @@ Unity版はこの `unity/` フォルダにまとめてあり、ほかのファ�
 ## 中身
 
 v0.6（REAL FOOTBALL EVOLUTION）で増えたファイル・仕組み・確認方法・テストは [`CHANGES_v0.6.md`](CHANGES_v0.6.md) にまとめています。
+v0.6 Real Football Engine の Phase 1（移動・操作感）の変更・調整値・確認手順は [`CHANGES_RFE_Phase1.md`](CHANGES_RFE_Phase1.md) にあります。
 
 | ファイル | 役割（Unreal版の対応ファイル） |
 | --- | --- |

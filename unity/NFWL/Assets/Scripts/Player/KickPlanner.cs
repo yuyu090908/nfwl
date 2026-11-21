@@ -154,7 +154,9 @@ namespace NFWL
             Vector3 attack = new Vector3(p.AttackSign, 0f, 0f);
             Vector3 mv = Flat(mate.Velocity);
             Vector3 runDir = (mv.magnitude > 1.5f ? Vector3.Lerp(mv.normalized, attack, 0.4f) : Vector3.Lerp(dir, attack, 0.6f)).normalized;
-            float runSpeed = mate.Locomotion.SprintSpeed * 0.95f;
+            // How far the runner gets in t seconds, accelerating from his current speed along the run
+            // (v0.6 Real Football Engine: the same movement model the runner really uses).
+            float runV0 = Mathf.Max(0f, Vector3.Dot(mv, runDir));
             float extra = Mathf.Lerp(1f, 4f, power);
             float elevation = lofted ? 34f : 0f;
             Vector3 backspin = Vector3.zero;
@@ -162,7 +164,7 @@ namespace NFWL
             float t = 0.8f, speed = 10f;
             for (int i = 0; i < 4; i++)
             {
-                target = mate.transform.position + runDir * (runSpeed * t + extra);
+                target = mate.transform.position + runDir * (mate.Locomotion.DistanceInTime(t, runV0, true, false) + extra);
                 target.x = Mathf.Clamp(target.x, -PitchDims.HalfLength + 1.5f, PitchDims.HalfLength - 1.5f);
                 target.z = Mathf.Clamp(target.z, -PitchDims.HalfWidth + 1f, PitchDims.HalfWidth - 1f);
                 Vector3 to = Flat(target - from);

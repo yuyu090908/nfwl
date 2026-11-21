@@ -143,19 +143,12 @@ namespace NFWL
             }
         }
 
-        /// <summary>Seconds this player needs to get to a point (run + a turn if it is behind him).</summary>
-        static float TimeToReach(PlayerController p, Vector3 point)
-        {
-            Vector3 d = point - p.transform.position;
-            d.y = 0f;
-            float dist = d.magnitude;
-            float top = p.Locomotion.TopSpeed(true, false);
-            float turn = dist > 0.5f ? Vector3.Angle(p.Locomotion.Facing, d) / 180f * 0.35f : 0f;
-            // Already moving that way helps, moving away costs.
-            float along = dist > 0.01f ? Vector3.Dot(p.Velocity, d / dist) : 0f;
-            float accel = Mathf.Clamp((top - along) / top, 0f, 2f) * 0.35f;
-            return dist / top + turn + accel;
-        }
+        /// <summary>
+        /// Seconds this player needs to get to a point: turn, brake if moving away, then the accelerating run
+        /// (v0.6 Real Football Engine: same movement model as the player really uses, not distance / top speed).
+        /// </summary>
+        static float TimeToReach(PlayerController p, Vector3 point) =>
+            p.Locomotion.EstimateTimeToReach(p.transform.position, point, true, false);
 
         /// <summary>Earliest point on the ball's path this player can be at in time, and when.</summary>
         float InterceptTime(PlayerController p, out Vector3 at)

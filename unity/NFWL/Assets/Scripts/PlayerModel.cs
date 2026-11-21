@@ -645,7 +645,7 @@ namespace NFWL
             gait.Right.overridden = kicking || actionRight || plantRight;
             gait.Left.overridden = actionLeft || plantLeft;
             bool pivoting = st == LocoState.PivotTurn || st == LocoState.SharpTurn || speed < 0.35f;
-            gait.Tick(root, lc.Velocity, lc.FacingYaw, dt, sc, crouch ? 1.9f : 1f, pivoting);
+            gait.Tick(root, lc.Velocity, lc.FacingYaw, dt, sc, crouch ? 1.9f : 1f, pivoting, lc.LocalAccel.z, owner.HasBall);
             ApplyFootAction(now);
             ApplyPlantFoot(now);
             KickBody(now, out float kickW, out float kickPelvisYaw, out float kickTorsoPitch, out float kickTorsoRoll,
@@ -673,7 +673,14 @@ namespace NFWL
             // Bob: lowest at mid-stance, twice per cycle.
             float bob = Mathf.Cos(gait.Phase * Mathf.PI * 4f - gait.StanceFraction * Mathf.PI * 2f) * 0.035f * run;
             float lunge = LungeWeight(now);
-            float crouchDrop = crouch ? 0.1f : st == LocoState.SharpTurn ? 0.07f : st == LocoState.Recovery ? 0.05f : 0f;
+            // v0.6 Real Football Engine: low first step, lower for a sharper cut, a little lower when braking.
+            float crouchDrop = crouch ? 0.1f
+                : st == LocoState.SharpTurn ? 0.05f + 0.04f * Mathf.Clamp01(Mathf.Abs(lc.TurnAngle) / 180f)
+                : st == LocoState.PivotTurn ? 0.05f
+                : st == LocoState.StartStep ? 0.06f
+                : st == LocoState.Recovery ? 0.05f
+                : (st == LocoState.Decelerate || st == LocoState.Stop) && lc.Braking ? 0.04f
+                : st == LocoState.Curve ? 0.02f : 0f;
             crouchDrop = Mathf.Max(crouchDrop, Mathf.Max(lunge * 0.16f, saveCrouch));
             // Pelvis twists toward the leg that swings forward; shoulders twist the other way.
             float legSignal = LegForwardSignal();
@@ -697,7 +704,10 @@ namespace NFWL
 
             // Arms swing opposite to the legs, bent at the elbow. Off balance or jockeying: arms out wide.
             float armAmp = Mathf.Lerp(12f, 55f, run);
-            float armOut = st == LocoState.Recovery ? 45f : crouch ? 24f : 8f + run * 4f;
+            if (st == LocoState.StartStep || st == LocoState.Accelerate) armAmp = Mathf.Max(armAmp, 45f); // strong arm drive on the first steps
+            float armOut = st == LocoState.Recovery ? 45f : crouch ? 24f
+                : st == LocoState.SharpTurn || st == LocoState.PivotTurn ? 20f // arms out to balance the cut
+                : lc.Braking ? 14f : 8f + run * 4f;
             armL.localRotation = Quaternion.Euler(float.IsNaN(armOverrideL) ? legSignal * armAmp : 0f, 0f, float.IsNaN(armOverrideL) ? -armOut : armOverrideL);
             armR.localRotation = Quaternion.Euler(float.IsNaN(armOverrideR) ? -legSignal * armAmp : 0f, 0f, float.IsNaN(armOverrideR) ? armOut : armOverrideR);
             float elbow = -20f - run * 65f;
