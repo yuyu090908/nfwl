@@ -34,6 +34,19 @@ namespace NFWL
 
         /// <summary>Raised on hard contacts: (what was hit, impact speed). Used for sound and effects.</summary>
         public event System.Action<string, float> Impact;
+        /// <summary>v0.7: the ball hit a goal net (contact point, ball velocity before the hit).</summary>
+        public static event System.Action<Vector3, Vector3> NetHit;
+        /// <summary>v0.7: flight type of the last kick (ground / driven / rising / curved / lofted).</summary>
+        public ShotTrajectory LastTrajectory { get; private set; }
+
+        /// <summary>Drawn size relative to the physical size: 1 (real, v0.7) or 1.6 (v0.6 readability boost).</summary>
+        public static float VisualScale => NFWLFeatures.RealBallSize ? 1f : 1.6f;
+
+        /// <summary>Applies the RealBallSize flag at once (graphics panel).</summary>
+        public void RefreshVisualScale()
+        {
+            if (visual != null) visual.localScale = Vector3.one * VisualScale;
+        }
 
         Transform squashPivot, visual;
         float squashUntil;
@@ -51,8 +64,12 @@ namespace NFWL
             go.GetComponent<Renderer>().enabled = false;
             // Squash pivot: briefly flattens the ball along the impact direction (deformation visual).
             Transform pivot = Visuals.Pivot(go.transform, Vector3.zero, "BallSquash");
-            GameObject vis = Visuals.Part(PrimitiveType.Sphere, pivot, Vector3.zero, Vector3.one * 1.6f,
-                Visuals.Mat(Color.white, 0.55f, Visuals.Ball), "BallVisual");
+            // v0.7: with the RealBallSize flag (default) the ball is drawn at its real size; it stays easy
+            // to follow through its contact shadow, the optional marker, the camera and the lighting.
+            Material ballMat = NFWLShaders.Has(NFWLShaders.Lit)
+                ? NFWLShaders.PBR(Color.white, 0.62f, 0f, ProceduralTextures.LeatherNormal, 0.35f, Visuals.Ball, null, new Color(0.04f, 0.04f, 0.045f))
+                : Visuals.Mat(Color.white, 0.55f, Visuals.Ball);
+            GameObject vis = Visuals.Part(PrimitiveType.Sphere, pivot, Vector3.zero, Vector3.one * VisualScale, ballMat, "BallVisual");
             go.AddComponent<Rigidbody>();
             Ball b = go.AddComponent<Ball>();
             b.squashPivot = pivot;
@@ -105,6 +122,7 @@ namespace NFWL
             HeldInHands = false;
             Body.angularVelocity = spin;
             Body.linearVelocity = velocity;
+            LastTrajectory = ShotTrajectories.Classify(velocity, spin, Tuning.magnusFactor);
             Squash(velocity, Mathf.Clamp01(velocity.magnitude / 30f));
             Impact?.Invoke("Kick", velocity.magnitude);
         }
@@ -191,6 +209,7 @@ namespace NFWL
 
             if (what == "NetCollider")
             {
+                NetHit?.Invoke(c.GetContact(0).point, v); // v0.7: the visible net bulges where it was hit
                 // The net gives: most of the pace is absorbed instead of bouncing back.
                 Body.linearVelocity = v * t.netAbsorb;
                 Body.angularVelocity *= 0.3f;

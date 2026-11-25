@@ -2,7 +2,9 @@ using UnityEngine;
 
 namespace NFWL
 {
-    public enum KickPhase { None, Preparation, Approach, PlantFoot, Backswing, Contact, FollowThrough, Recovery }
+    /// <summary>v0.7: eight visible stages (Approach .. Recovery). HipRotation and KneeExtension split the
+    /// downswing: the pelvis turns first, then the knee snaps straight into the ball (proximal-to-distal).</summary>
+    public enum KickPhase { None, Preparation, Approach, PlantFoot, Backswing, HipRotation, KneeExtension, Contact, FollowThrough, Recovery }
 
     /// <summary>
     /// PHASE 3.1: every kick runs through Preparation, Approach, Plant Foot, Backswing, Contact,
@@ -28,6 +30,8 @@ namespace NFWL
         public float PlantTime { get; private set; }
         public float BackswingTime { get; private set; }
         public float ContactTime { get; private set; }
+        /// <summary>v0.7: end of the hip rotation, start of the knee extension (45 % into the downswing).</summary>
+        public float HipEndTime => BackswingTime + (ContactTime - BackswingTime) * 0.45f;
         public float FollowEndTime { get; private set; }
         public float RecoverEndTime { get; private set; }
 
@@ -156,6 +160,8 @@ namespace NFWL
             if (now >= FollowEndTime) Phase = KickPhase.Recovery;
             else if (contactDone && now >= ContactTime + 0.03f) Phase = KickPhase.FollowThrough;
             else if (now >= ContactTime - 0.01f) Phase = KickPhase.Contact;
+            else if (now >= HipEndTime) Phase = KickPhase.KneeExtension;
+            else if (now >= BackswingTime) Phase = KickPhase.HipRotation;
             else if (now >= PlantTime) Phase = KickPhase.Backswing;
             else if (now >= PlantTime - 0.06f) Phase = KickPhase.PlantFoot;
             else if (now >= StartTime + 0.03f) Phase = KickPhase.Approach;

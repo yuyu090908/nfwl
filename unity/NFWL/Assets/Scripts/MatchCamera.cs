@@ -31,6 +31,58 @@ namespace NFWL
         public float zoomOutAtSpeed = 0.22f;   // +22 % distance for a 25 m/s ball
 
         public Mode CurrentMode { get; private set; } = Mode.Broadcast;
+
+        /// <summary>v0.7 camera preset (PHASE 10.2). All values can be edited in the Inspector.</summary>
+        [System.Serializable]
+        public struct Preset
+        {
+            public string name;
+            public float distance, pitch, fov;
+            [Tooltip("0 = follow the ball, 1 = follow your player")] public float playerPriority;
+            [Tooltip("Seconds of ball motion the camera looks ahead")] public float lead;
+            [Tooltip("Follow smoothing (s): larger = calmer")] public float smoothTime;
+            public Preset(string n, float d, float p, float f, float pp, float l, float s)
+            { name = n; distance = d; pitch = p; fov = f; playerPriority = pp; lead = l; smoothTime = s; }
+        }
+
+        [Header("v0.7 presets (Z cycles; the v0.6 distances 16 / 24 / 11 m are kept)")]
+        public Preset[] presets =
+        {
+            new Preset("Broadcast", 16f, 42f, 55f, 0.35f, 0.35f, 0.32f),
+            new Preset("Wide", 24f, 44f, 55f, 0.3f, 0.4f, 0.36f),
+            new Preset("Tactical", 30f, 62f, 50f, 0.2f, 0.45f, 0.4f),
+            new Preset("Close", 11f, 36f, 55f, 0.5f, 0.3f, 0.26f),
+        };
+        public int presetIndex;
+        public Preset CurrentPreset => presets != null && presets.Length > 0 ? presets[Mathf.Clamp(presetIndex, 0, presets.Length - 1)] : new Preset("Broadcast", distance, pitchDeg, fieldOfView, 0.35f, leadSeconds, smoothTime);
+        /// <summary>How much the anchor leans toward the user's player (read by MatchManager).</summary>
+        public float PlayerPriority => CurrentPreset.playerPriority;
+        float fovVel, curFov = -1f;
+
+        /// <summary>Z: next preset (Broadcast -> Wide -> Tactical -> Close -> Broadcast).</summary>
+        public void NextPreset()
+        {
+            if (presets == null || presets.Length == 0) return;
+            presetIndex = (presetIndex + 1) % presets.Length;
+            ApplyPresetValues();
+        }
+
+        public void SetPreset(int index)
+        {
+            if (presets == null || presets.Length == 0) return;
+            presetIndex = Mathf.Clamp(index, 0, presets.Length - 1);
+            ApplyPresetValues();
+        }
+
+        void ApplyPresetValues()
+        {
+            Preset p = CurrentPreset;
+            distance = p.distance;
+            pitchDeg = p.pitch;
+            fieldOfView = p.fov;
+            leadSeconds = p.lead;
+            smoothTime = p.smoothTime;
+        }
         public Ball Ball { get; set; }
 
         Vector3 focus, focusVel;
@@ -48,7 +100,9 @@ namespace NFWL
         void Start()
         {
             Camera cam = GetComponent<Camera>();
+            ApplyPresetValues();
             if (cam != null) cam.fieldOfView = fieldOfView;
+            curFov = fieldOfView;
             curDistance = distance;
             curPitch = pitchDeg;
             if (target != null) focus = target.position;
@@ -127,6 +181,8 @@ namespace NFWL
 
             // ---------- framing: zoom and angle ----------
             float wantDist = distance * (1f + zoomOutAtSpeed * Mathf.Clamp01(ballSpeed / 25f));
+            // v0.7: a high ball pulls the camera back a little so it does not leave the top of the frame.
+            if (Ball != null) wantDist += Mathf.Clamp(Ball.transform.position.y - 1.5f, 0f, 6f) * 0.5f;
             float nearGoal = Mathf.InverseLerp(PitchDims.HalfLength - 12f, PitchDims.HalfLength - 4f, Mathf.Abs(want.x));
             wantDist *= 1f - 0.08f * nearGoal;
             float wantPitch = pitchDeg;
@@ -155,7 +211,17 @@ namespace NFWL
             curDistance = Mathf.SmoothDamp(curDistance, wantDist, ref distVel, 0.5f, Mathf.Infinity, dt);
             curPitch = Mathf.SmoothDamp(curPitch, wantPitch, ref pitchVel, 0.45f, Mathf.Infinity, dt);
             curYaw = Mathf.SmoothDampAngle(curYaw, wantYaw, ref yawVel, 0.5f, Mathf.Infinity, dt);
+            SmoothFov(dt);
             Apply(focus, curYaw, curPitch, curDistance);
+        }
+
+        void SmoothFov(float dt)
+        {
+            Camera cam = GetComponent<Camera>();
+            if (cam == null) return;
+            if (curFov < 0f) curFov = fieldOfView;
+            curFov = Mathf.SmoothDamp(curFov, fieldOfView, ref fovVel, 0.5f, Mathf.Infinity, dt);
+            cam.fieldOfView = curFov;
         }
 
         void Apply(Vector3 f, float yaw, float pitch, float dist)
