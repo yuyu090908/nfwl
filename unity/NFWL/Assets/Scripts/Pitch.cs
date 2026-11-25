@@ -17,7 +17,9 @@ namespace NFWL
         static readonly Color NetWhite = new Color(0.92f, 0.94f, 0.96f);
         static readonly Color Concrete = new Color(0.32f, 0.34f, 0.4f);
         static readonly Color Steel = new Color(0.55f, 0.58f, 0.65f);
-        const float LineY = 0.006f;
+        float LineY = 0.006f;
+        float lineThick = 0.01f;
+        Material grassMat;
 
         bool built;
 
@@ -30,6 +32,21 @@ namespace NFWL
             float W = PitchDims.HalfWidth * 2f;
             float LW = PitchDims.LineWidth;
 
+            // v0.7: one turf surface with the NFWL/Grass shader (stripes, colour variation, mowing sheen,
+            // distance-faded blade normals) and optional short 3D grass near the camera.
+            grassMat = BuildGrassMaterial();
+            if (grassMat != null)
+            {
+                AddBox("Ground", new Vector3(0f, -0.1f, 0f), new Vector3(L + 8f, 0.2f, W + 8f), grassMat, true);
+                AddBox("Track", new Vector3(0f, -0.12f, 0f), new Vector3(L + 30f, 0.2f, W + 30f),
+                    NFWLShaders.PBR(new Color(0.11f, 0.13f, 0.18f), 0.25f, 0f, ProceduralTextures.ConcreteNormal, 0.5f, null, new Vector2(20f, 20f)), true);
+                GrassShells.Create(transform, L + 6f, W + 6f, grassMat);
+                // Lines stand just above the short-grass layers.
+                LineY = 0.012f;
+                lineThick = 0.024f;
+            }
+            else
+            {
             // Ground: surround grass (collides), outer track, and mown stripes on the pitch.
             Material surround = Visuals.Mat(Surround, 0.05f, Visuals.Grass, new Vector2(12f, 8f));
             AddBox("Ground", new Vector3(0f, -0.1f, 0f), new Vector3(L + 8f, 0.2f, W + 8f), surround, true);
@@ -44,14 +61,15 @@ namespace NFWL
                 float x = -PitchDims.HalfLength - 1f + stripeLen * (i + 0.5f);
                 AddBox("Stripe", new Vector3(x, 0.001f, 0f), new Vector3(stripeLen, 0.002f, W + 2f), i % 2 == 0 ? dark : light, false);
             }
+            }
 
             // Lines.
-            Material line = Visuals.Mat(LineWhite, 0.1f);
-            AddBox("Touchline", new Vector3(0f, LineY, PitchDims.HalfWidth), new Vector3(L + LW, 0.01f, LW), line, false);
-            AddBox("Touchline", new Vector3(0f, LineY, -PitchDims.HalfWidth), new Vector3(L + LW, 0.01f, LW), line, false);
-            AddBox("GoalLine", new Vector3(PitchDims.HalfLength, LineY, 0f), new Vector3(LW, 0.01f, W + LW), line, false);
-            AddBox("GoalLine", new Vector3(-PitchDims.HalfLength, LineY, 0f), new Vector3(LW, 0.01f, W + LW), line, false);
-            AddBox("HalfwayLine", new Vector3(0f, LineY, 0f), new Vector3(LW, 0.01f, W), line, false);
+            Material line = grassMat != null ? NFWLShaders.PBR(LineWhite * 0.92f, 0.12f, 0f, ProceduralTextures.TurfNormal, 0.5f, null, new Vector2(8f, 8f)) : Visuals.Mat(LineWhite, 0.1f);
+            AddBox("Touchline", new Vector3(0f, LineY, PitchDims.HalfWidth), new Vector3(L + LW, lineThick, LW), line, false);
+            AddBox("Touchline", new Vector3(0f, LineY, -PitchDims.HalfWidth), new Vector3(L + LW, lineThick, LW), line, false);
+            AddBox("GoalLine", new Vector3(PitchDims.HalfLength, LineY, 0f), new Vector3(LW, lineThick, W + LW), line, false);
+            AddBox("GoalLine", new Vector3(-PitchDims.HalfLength, LineY, 0f), new Vector3(LW, lineThick, W + LW), line, false);
+            AddBox("HalfwayLine", new Vector3(0f, LineY, 0f), new Vector3(LW, lineThick, W), line, false);
 
             AddArc(Vector2.zero, PitchDims.CenterRadius, 0f, 360f, 48, line);
             AddArc(new Vector2(PitchDims.HalfLength, 0f), PitchDims.PenaltyRadius, 90f, 270f, 40, line);
@@ -69,6 +87,20 @@ namespace NFWL
                 BuildCornerFlag(new Vector3(sx * PitchDims.HalfLength, 0f, sz * PitchDims.HalfWidth));
 
             BuildStadium();
+        }
+
+        static Material BuildGrassMaterial()
+        {
+            Material m = NFWLShaders.Simple(NFWLShaders.Grass, "NFWL Turf");
+            if (m == null) return null;
+            m.SetTexture("_NoiseTex", ProceduralTextures.Noise);
+            m.SetTexture("_BumpMap", ProceduralTextures.TurfNormal);
+            m.SetColor("_ColorDark", GrassDark * 0.82f);
+            m.SetColor("_ColorLight", GrassLight * 0.86f);
+            m.SetFloat("_StripeWidth", (PitchDims.HalfLength * 2f + 2f) / 12f); // same 12 stripes as v0.6
+            m.SetFloat("_HalfLength", PitchDims.HalfLength);
+            m.SetFloat("_HalfWidth", PitchDims.HalfWidth);
+            return m;
         }
 
         // -------------------------------------------------------------------
@@ -93,7 +125,7 @@ namespace NFWL
             go.name = "Spot";
             go.transform.SetParent(transform, false);
             go.transform.localPosition = center;
-            go.transform.localScale = new Vector3(diameter, 0.005f, diameter);
+            go.transform.localScale = new Vector3(diameter, lineThick * 0.5f, diameter);
             Finish(go, mat, false);
         }
 
@@ -117,7 +149,7 @@ namespace NFWL
                 float rad = midDeg * Mathf.Deg2Rad;
                 Vector3 pos = new Vector3(center.x + radius * Mathf.Cos(rad), LineY, center.y + radius * Mathf.Sin(rad));
                 // Unity yaw turns +X towards -Z, so the tangent of angle a is a yaw of -(a + 90).
-                AddBox("Arc", pos, new Vector3(segLen, 0.01f, PitchDims.LineWidth), mat, false, -(midDeg + 90f));
+                AddBox("Arc", pos, new Vector3(segLen, lineThick, PitchDims.LineWidth), mat, false, -(midDeg + 90f));
             }
         }
 
@@ -145,7 +177,9 @@ namespace NFWL
             float midX = sign * (PitchDims.HalfLength + PitchDims.GoalDepth * 0.5f);
             float gh = PitchDims.GoalHeight;
             float gw = PitchDims.GoalHalfWidth;
-            Material white = Visuals.Mat(Color.white, 0.6f);
+            bool v7 = NFWLShaders.Has(NFWLShaders.Lit);
+            // Painted aluminium frame: white, fairly glossy, catching the floodlight highlights.
+            Material white = v7 ? NFWLShaders.PBR(new Color(0.95f, 0.95f, 0.96f), 0.78f, 0.1f) : Visuals.Mat(Color.white, 0.6f);
             Material net = Visuals.Mat(NetWhite, 0.05f);
 
             // Frame: posts sit just outside the goal mouth so the inner width stays 3m.
@@ -163,6 +197,14 @@ namespace NFWL
             AddBox("NetCollider", new Vector3(midX, gh * 0.5f, -gw - wall), new Vector3(PitchDims.GoalDepth, gh, wall), null, true);
             AddBox("NetCollider", new Vector3(midX, gh + wall, 0f), new Vector3(PitchDims.GoalDepth, wall, gw * 2f), null, true);
 
+            // v0.7: a deforming mesh net (Stadium/GoalNet.cs) when the net shader is available.
+            Material netMat = NFWLShaders.Simple(NFWLShaders.Net, "Goal Net");
+            if (netMat != null)
+            {
+                netMat.SetColor("_Color", NetWhite);
+                GoalNet.Build(transform, sign, netMat);
+                return;
+            }
             // Visible net: a mesh of thin strings.
             const float cell = 0.2f;
             const float t = 0.012f;
@@ -199,6 +241,12 @@ namespace NFWL
 
         void BuildStadium()
         {
+            if (NFWLFeatures.NextGenStadium && NFWLShaders.Has(NFWLShaders.Lit))
+            {
+                StadiumBuilder.Build(transform);
+                CrowdBuilder.Create(transform);
+                return;
+            }
             float hl = PitchDims.HalfLength;
             float hw = PitchDims.HalfWidth;
 

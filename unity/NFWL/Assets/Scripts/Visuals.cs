@@ -19,7 +19,14 @@ namespace NFWL
             {
                 if (baseMaterial == null)
                 {
-                    // Borrow Unity's default material (works with whatever shader the project uses).
+                    // v0.7: NFWL/Lit (PBR with normal maps and emission that is never stripped from builds).
+                    Shader lit = NFWLShaders.Get(NFWLShaders.Lit);
+                    if (lit != null)
+                    {
+                        baseMaterial = new Material(lit) { name = "NFWL Base", enableInstancing = true };
+                        return baseMaterial;
+                    }
+                    // v0.6 fallback: borrow Unity's default material (works with whatever shader the project uses).
                     GameObject tmp = GameObject.CreatePrimitive(PrimitiveType.Cube);
                     baseMaterial = new Material(tmp.GetComponent<Renderer>().sharedMaterial);
                     Object.DestroyImmediate(tmp);

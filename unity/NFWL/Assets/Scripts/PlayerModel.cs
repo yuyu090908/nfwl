@@ -10,7 +10,7 @@ namespace NFWL
     /// run cycle scaled by speed, kick swing, goalkeeper dive and goal celebration.
     /// Lightweight on purpose (no downloaded models), so it runs well on an 8GB Mac.
     /// </summary>
-    public class PlayerModel : MonoBehaviour
+    public partial class PlayerModel : MonoBehaviour
     {
         Transform body, hips, torso, head;
         Transform legL, legR, kneeL, kneeR, ankleL, ankleR, armL, armR, elbowL, elbowR;
@@ -54,6 +54,12 @@ namespace NFWL
             m.transform.SetParent(root, false);
             m.transform.localScale = Vector3.one * heightScale;
             m.heightScale = heightScale;
+            if (NFWLFeatures.AnatomicalModel && NFWLShaders.Has(NFWLShaders.Lit))
+            {
+                // v0.7: smooth anatomical body with the same joints (Character/PlayerModel.Anatomy.cs).
+                BuildAnatomical(m, kit, el, number, hairStyle, owner.rarity, owner.role == Role.GK);
+                return m;
+            }
 
             Material shirt = Visuals.Mat(kit.body, 0.3f);
             Material trim = Visuals.Mat(kit.trim, 0.5f);
@@ -746,6 +752,7 @@ namespace NFWL
                 }
             }
             SolveLeg(legR, kneeR, ankleR, gait.Right, ikWeightR, kickHip, kickKnee, sc);
+            UpdateContactShadows();
         }
 
         /// <summary>+1 when the left leg is swinging forward / right leg back, -1 the other way.</summary>

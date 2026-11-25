@@ -29,7 +29,7 @@ namespace NFWL
         public int AwayScore { get; private set; }
         public bool PlayersFrozen => fullTime || (replay != null && replay.Playing);
 
-        public const string Version = "NFWL Unity v0.6 Real Football Engine  Phase 1";
+        public const string Version = "NFWL Unity v0.7 Real Football Motion & Photoreal Stadium";
 
         static readonly Color HomeColor = new Color(0.55f, 0.32f, 0.98f); // NFWL crystal violet
         static readonly Color AwayColor = new Color(0.55f, 0.7f, 0.95f);  // frost blue
@@ -80,6 +80,8 @@ namespace NFWL
 
         void Start()
         {
+            // v0.7: graphics preset first, so the stadium builds crowd / grass / net at the right detail.
+            GraphicsQuality.Apply(GraphicsQuality.SavedLevel, false);
             new GameObject("Stadium").AddComponent<Pitch>().Build();
             ball = Ball.Create();
 
@@ -113,10 +115,18 @@ namespace NFWL
             replay.Init(ball, all, matchCam);
             sfx = SoundFX.Create(transform);
             ball.Impact += (kind, speed) => sfx.OnBallImpact(kind, speed, ball.transform.position);
+            // v0.7: crowd / LED atmosphere, ball contact shadow, graphics settings (F3).
+            atmosphere = gameObject.AddComponent<MatchAtmosphere>();
+            atmosphere.Init(ball);
+            graphicsPanel = gameObject.AddComponent<GraphicsSettingsPanel>();
+            graphicsPanel.Init(ball);
             ResetKickoff();
         }
 
         MatchCamera matchCam;
+        MatchAtmosphere atmosphere;
+        GraphicsSettingsPanel graphicsPanel;
+        int framesSinceStart;
         ReplaySystem replay;
         SoundFX sfx;
         bool replayQueued;
@@ -300,6 +310,12 @@ namespace NFWL
             Light sun = null;
             Light existing = FindAnyObjectByType<Light>();
             if (existing != null && existing.type == LightType.Directional) sun = existing;
+            if (NFWLFeatures.FloodlightRig)
+            {
+                // v0.7: one shadow-casting floodlight + coloured fills, night sky, reflections (Rendering/StadiumLighting.cs).
+                StadiumLighting.Setup(sun);
+                return;
+            }
             if (sun == null)
             {
                 sun = new GameObject("Sun").AddComponent<Light>();
@@ -334,11 +350,14 @@ namespace NFWL
                 cam = go.AddComponent<Camera>();
                 go.AddComponent<AudioListener>();
             }
-            cam.clearFlags = CameraClearFlags.SolidColor;
+            bool sky = NFWLFeatures.FloodlightRig && RenderSettings.skybox != null && RenderSettings.skybox.shader == NFWLShaders.Get(NFWLShaders.Sky);
+            cam.clearFlags = sky ? CameraClearFlags.Skybox : CameraClearFlags.SolidColor;
             cam.backgroundColor = new Color(0.05f, 0.08f, 0.18f); // dark navy night sky (Master Doc UI concept)
-            cam.farClipPlane = 200f;
+            cam.nearClipPlane = 0.3f;
+            cam.farClipPlane = 260f;
             cam.allowMSAA = true;
-            QualitySettings.antiAliasing = 4;
+            // v0.7: MSAA, HDR, shadows etc. come from the graphics preset (GraphicsQuality); post effects on the camera.
+            if (cam.GetComponent<NFWLPostProcess>() == null) cam.gameObject.AddComponent<NFWLPostProcess>();
             MatchCamera follow = cam.GetComponent<MatchCamera>();
             if (follow == null) follow = cam.gameObject.AddComponent<MatchCamera>();
             follow.target = cameraAnchor;
@@ -351,6 +370,10 @@ namespace NFWL
         void Update()
         {
             PerfStats.EndFrame();
+            GraphicsQuality.TickAuto(Time.unscaledDeltaTime);
+            if (++framesSinceStart == 3) StadiumLighting.CaptureReflections(); // once the stadium has rendered
+            if (atmosphere != null) atmosphere.Tick(fullTime ? 0f : Danger(), PlayersFrozen);
+            if (ballMarker != null) ballMarker.gameObject.SetActive(GraphicsSettingsPanel.BallMarker);
             if (KeyInput.Down(KeyCode.F2)) showPerf = !showPerf;
             if (KeyInput.Down(KeyCode.F4)) AutoPlay = !AutoPlay;
             if (replay != null && replay.Playing)
@@ -374,9 +397,13 @@ namespace NFWL
             if (KeyInput.Down(KeyCode.F1)) showAIDebug = !showAIDebug; // v0.6: AI role labels
             if (KeyInput.Down(KeyCode.Z) && Camera.main != null)
             {
-                // Z: zoom between close-up (see the characters) and wide (see the whole play).
+                // Z: camera presets (v0.7): Broadcast 16 m -> Wide 24 m -> Tactical -> Close 11 m.
                 MatchCamera mc = Camera.main.GetComponent<MatchCamera>();
-                if (mc != null) mc.distance = mc.distance < 14f ? 16f : mc.distance < 20f ? 24f : 11f;
+                if (mc != null)
+                {
+                    mc.NextPreset();
+                    ShowEvent("CAMERA  " + mc.CurrentPreset.name.ToUpper(), 1.2f);
+                }
             }
 
             UpdateCameraAnchor();
@@ -584,7 +611,7 @@ namespace NFWL
             // Follow the ball, leaning toward the user's player so he stays on screen.
             Vector3 b = ball.transform.position;
             Vector3 h = human != null ? human.transform.position : b;
-            Vector3 target = Vector3.Lerp(b, h, 0.35f);
+            Vector3 target = Vector3.Lerp(b, h, matchCam != null ? matchCam.PlayerPriority : 0.35f);
             target.y = 0f;
             target.x = Mathf.Clamp(target.x, -PitchDims.HalfLength + 6f, PitchDims.HalfLength - 6f);
             target.z = Mathf.Clamp(target.z, -PitchDims.HalfWidth + 6f, PitchDims.HalfWidth - 4f);
@@ -597,12 +624,12 @@ namespace NFWL
             {
                 // White ring on the grass under the ball, so you can see where it is even in the air.
                 Vector3 b = ball.transform.position;
-                ballMarker.position = new Vector3(b.x, 0.012f, b.z);
+                ballMarker.position = new Vector3(b.x, 0.03f, b.z); // above the v0.7 short grass and lines
                 float k = 0.7f + Mathf.Clamp(b.y, 0f, 3f) * 0.15f;
                 ballMarker.localScale = new Vector3(k, 0.002f, k);
             }
             if (marker == null || human == null) return;
-            marker.position = human.transform.position + Vector3.up * 0.015f;
+            marker.position = human.transform.position + Vector3.up * 0.032f;
             float pulse = 1f + Mathf.Sin(Time.time * 6f) * 0.06f;
             marker.localScale = new Vector3(1.1f * pulse, 0.003f, 1.1f * pulse);
         }
@@ -611,6 +638,7 @@ namespace NFWL
         {
             if (homeScored) HomeScore++; else AwayScore++;
             ShowEvent("GOAL!", goalResetDelay);
+            if (atmosphere != null) atmosphere.OnGoal();
             PlayerController scorer = ball.LastTouchedBy;
             if (scorer != null && scorer.teamIndex == (homeScored ? 0 : 1))
             {
