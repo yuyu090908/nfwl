@@ -171,27 +171,7 @@ namespace NFWL
 
         void StepDynamic(Panel p, float dt)
         {
-            // Two sub-steps keep the spring network stable at 30 FPS.
-            float h = dt * 0.5f;
-            float energy = 0f;
-            for (int s = 0; s < 2; s++)
-            {
-                for (int r = 0; r < p.rows; r++)
-                for (int c = 0; c < p.cols; c++)
-                {
-                    int i = r * p.cols + c;
-                    if (p.pinned[i]) continue;
-                    float lap = p.disp[i - 1] + p.disp[i + 1] + p.disp[i - p.cols] + p.disp[i + p.cols] - 4f * p.disp[i];
-                    float a = -stiffness * p.disp[i] - damping * p.vel[i] + coupling * lap;
-                    p.vel[i] += a * h;
-                }
-                for (int i = 0; i < p.disp.Length; i++)
-                {
-                    if (p.pinned[i]) continue;
-                    p.disp[i] = Mathf.Clamp(p.disp[i] + p.vel[i] * h, -maxBulge * 0.3f, maxBulge);
-                    energy += Mathf.Abs(p.disp[i]) + Mathf.Abs(p.vel[i]) * 0.1f;
-                }
-            }
+            float energy = NetSpring.Step(p.disp, p.vel, p.pinned, p.cols, p.rows, stiffness, damping, coupling, maxBulge, dt);
             for (int i = 0; i < p.current.Length; i++) p.current[i] = p.rest[i] + p.normal * p.disp[i];
             p.mesh.vertices = p.current;
             if (energy / p.disp.Length < 0.0002f)

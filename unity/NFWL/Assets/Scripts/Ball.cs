@@ -36,6 +36,8 @@ namespace NFWL
         public event System.Action<string, float> Impact;
         /// <summary>v0.7: the ball hit a goal net (contact point, ball velocity before the hit).</summary>
         public static event System.Action<Vector3, Vector3> NetHit;
+        /// <summary>v0.7: flight type of the last kick (ground / driven / rising / curved / lofted).</summary>
+        public ShotTrajectory LastTrajectory { get; private set; }
 
         /// <summary>Drawn size relative to the physical size: 1 (real, v0.7) or 1.6 (v0.6 readability boost).</summary>
         public static float VisualScale => NFWLFeatures.RealBallSize ? 1f : 1.6f;
@@ -120,6 +122,7 @@ namespace NFWL
             HeldInHands = false;
             Body.angularVelocity = spin;
             Body.linearVelocity = velocity;
+            LastTrajectory = ShotTrajectories.Classify(velocity, spin, Tuning.magnusFactor);
             Squash(velocity, Mathf.Clamp01(velocity.magnitude / 30f));
             Impact?.Invoke("Kick", velocity.magnitude);
         }

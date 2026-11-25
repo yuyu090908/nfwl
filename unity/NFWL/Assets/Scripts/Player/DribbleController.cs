@@ -228,7 +228,7 @@ namespace NFWL
             }
             else
             {
-                interval = TouchInterval(kind, a, sprint);
+                interval = TouchInterval(kind, a, sprint) * (p.Model != null ? p.Model.Profile.touchRhythmScale : 1f); // v0.7 personal rhythm
                 // Where the player will be when he meets the ball again (he may still be accelerating).
                 float top = loco.TopSpeed(sprint, true) * Mathf.Clamp01(moveAmount);
                 float cur = Vector3.Dot(loco.Velocity, want);

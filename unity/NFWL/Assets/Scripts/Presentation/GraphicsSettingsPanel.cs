@@ -93,7 +93,7 @@ namespace NFWL
             }
 
             GUILayout.Space(8f);
-            GUILayout.Label("v0.7 機能フラグ（次の試合から反映。R で試合終了後に再開、または Play し直し）", label);
+            GUILayout.Label("v0.7 機能フラグ（Play し直すと反映）", label);
             Flag("NFWL シェーダー (PBR / 芝 / 結晶)", NFWLFeatures.NewShaders, v => NFWLFeatures.NewShaders = v);
             Flag("夜間照明リグ (floodlight rig)", NFWLFeatures.FloodlightRig, v => NFWLFeatures.FloodlightRig = v);
             Flag("人体メッシュの選手 (anatomical model)", NFWLFeatures.AnatomicalModel, v => NFWLFeatures.AnatomicalModel = v);

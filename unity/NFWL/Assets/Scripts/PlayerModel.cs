@@ -24,6 +24,10 @@ namespace NFWL
         float lean;
         float heightScale = 1f;
         readonly GaitController gait = new GaitController();
+        /// <summary>v0.7: this player's running style (MotionProfile).</summary>
+        public MotionProfile Profile { get; private set; } = MotionProfile.Neutral;
+        float stumble; // v0.7: 0..1 stumble weight (sudden balance loss)
+        float lastBalance = 1f;
         float ikWeightL = 1f, ikWeightR = 1f;
         float pelvisDrop;
 
@@ -54,6 +58,9 @@ namespace NFWL
             m.transform.SetParent(root, false);
             m.transform.localScale = Vector3.one * heightScale;
             m.heightScale = heightScale;
+            m.Profile = NFWLFeatures.MotionVariation ? MotionProfile.For(owner.teamIndex, number, heightScale) : MotionProfile.Neutral;
+            m.gait.CadenceScale = m.Profile.cadenceScale;
+            m.gait.PhaseOffset = m.Profile.phaseOffset;
             if (NFWLFeatures.AnatomicalModel && NFWLShaders.Has(NFWLShaders.Lit))
             {
                 // v0.7: smooth anatomical body with the same joints (Character/PlayerModel.Anatomy.cs).
@@ -466,8 +473,11 @@ namespace NFWL
             float back = Mathf.InverseLerp(kick.PlantTime, kick.BackswingTime, now);
             float through = Mathf.InverseLerp(kick.BackswingTime, kick.FollowEndTime, now);
             float pw = 0.6f + 0.4f * kickForm.power;
-            // Kicking hip goes back in the backswing, then the pelvis rotates through the ball.
-            pelvisYaw = side * (-28f * back * (1f - through) + 32f * through) * pw;
+            // Kicking hip goes back in the backswing, then (v0.7) the pelvis rotates through mostly during the
+            // HipRotation stage, before the knee extends: proximal-to-distal sequencing like a real strike.
+            float hipT = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(kick.BackswingTime, kick.HipEndTime + (kick.ContactTime - kick.HipEndTime) * 0.5f, now));
+            float followT = Mathf.InverseLerp(kick.ContactTime, kick.FollowEndTime, now);
+            pelvisYaw = side * (-28f * back * (1f - hipT) + 24f * hipT + 8f * followT) * pw;
             torsoPitch = Mathf.Lerp(14f, -10f, kickForm.loft) * weight;
             // Lean away from the kicking leg, over the plant foot.
             torsoRoll = side * 11f * weight;
@@ -616,7 +626,13 @@ namespace NFWL
             bool crouch = st == LocoState.Jockey || st == LocoState.SideStep || st == LocoState.Backpedal;
 
             // ---------- full-body overrides (dive, celebration) ----------
-            Quaternion bodyRot = Quaternion.Euler(0f, 0f, lc.LeanRoll + lc.SwayRoll); // lean into curves, sway from bumps
+            // v0.7 stumble: a sudden loss of balance (missed tackle, heavy shoulder charge, sharp cut at
+            // speed) lurches the upper body and throws the arms out; balance recovery brings it back.
+            float bal = lc.Balance;
+            if (bal < lastBalance - 0.08f && bal < 0.75f) stumble = Mathf.Max(stumble, Mathf.Clamp01((0.85f - bal) * 1.6f));
+            stumble = Mathf.MoveTowards(stumble, 0f, dt * 1.6f * Mathf.Max(0.3f, bal));
+            lastBalance = bal;
+            Quaternion bodyRot = Quaternion.Euler(0f, 0f, lc.LeanRoll * Profile.turnLeanScale + lc.SwayRoll); // lean into curves, sway from bumps
             Vector3 bodyPos = Vector3.zero;
             bool airborne = false;
             float armOverrideL = float.NaN, armOverrideR = float.NaN;
@@ -704,16 +720,17 @@ namespace NFWL
             hips.localPosition = new Vector3(0f, HipHeight - crouchDrop - bob - pelvisDrop, 0f);
 
             // ---------- upper body ----------
-            lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 14f : 0f), 1f - Mathf.Exp(-14f * dt));
+            lean = Mathf.Lerp(lean, lc.LeanPitch + (crouch ? 14f : 0f) + Profile.leanOffset * run + stumble * 22f, 1f - Mathf.Exp(-14f * dt));
             torso.localRotation = Quaternion.Euler(lean + kickTorsoPitch + chestLean + lunge * 18f + saveTorso, -pelvisYaw * (1.6f - kickW * 1.2f), -pelvisRoll + kickTorsoRoll);
             head.localRotation = Quaternion.Euler(-lean * 0.5f, pelvisYaw * 0.6f, 0f); // eyes stay on the play
 
             // Arms swing opposite to the legs, bent at the elbow. Off balance or jockeying: arms out wide.
-            float armAmp = Mathf.Lerp(12f, 55f, run);
+            float armAmp = Mathf.Lerp(12f, 55f, run) * Profile.armSwingScale;
             if (st == LocoState.StartStep || st == LocoState.Accelerate) armAmp = Mathf.Max(armAmp, 45f); // strong arm drive on the first steps
             float armOut = st == LocoState.Recovery ? 45f : crouch ? 24f
                 : st == LocoState.SharpTurn || st == LocoState.PivotTurn ? 20f // arms out to balance the cut
                 : lc.Braking ? 14f : 8f + run * 4f;
+            armOut += Profile.armOutOffset + stumble * 50f; // stumbling: arms thrown out to catch balance
             armL.localRotation = Quaternion.Euler(float.IsNaN(armOverrideL) ? legSignal * armAmp : 0f, 0f, float.IsNaN(armOverrideL) ? -armOut : armOverrideL);
             armR.localRotation = Quaternion.Euler(float.IsNaN(armOverrideR) ? -legSignal * armAmp : 0f, 0f, float.IsNaN(armOverrideR) ? armOut : armOverrideR);
             float elbow = -20f - run * 65f;

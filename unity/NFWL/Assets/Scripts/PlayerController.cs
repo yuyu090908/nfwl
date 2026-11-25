@@ -662,8 +662,10 @@ namespace NFWL
             {
                 return; // the ball is not at the foot: no contact
             }
+            MotionEvents.Raise(this, FootContactKind.Kick, ball.Body.position); // v0.7 contact event (same physics step)
             KickResult res = KickPlanner.Plan(this, ball, strike);
             ball.Kick(res.velocity, res.spin, this);
+            if (strike.type == KickType.Shoot) res.label += "  · " + ShotTrajectories.Label(ball.LastTrajectory); // v0.7 flight type
             LastKickLabel = res.label;
             LastKickTime = Time.time;
             if (Match != null) Match.ShowKickLabel(this, res.label);

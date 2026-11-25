@@ -39,6 +39,10 @@ namespace NFWL
         public readonly Foot Right = new Foot(1f);
         /// <summary>Gait clock 0..1 (left foot lifts at StanceFraction, right half a cycle later).</summary>
         public float Phase { get; private set; }
+        /// <summary>v0.7: per-player cadence (MotionProfile); stride = speed / cadence keeps the feet locked.</summary>
+        public float CadenceScale = 1f;
+        /// <summary>v0.7: per-player gait phase at reset, so players do not step in unison.</summary>
+        public float PhaseOffset;
         public float CycleHz { get; private set; }
         public float StanceFraction { get; private set; } = 0.6f;
         public bool Moving { get; private set; }
@@ -78,7 +82,7 @@ namespace NFWL
                 f.progress = 0f;
             }
             Phase = 0f;
-            cycles = 0f;
+            cycles = PhaseOffset;
             Moving = false;
             lastRoot = root;
             initialised = true;
@@ -109,7 +113,7 @@ namespace NFWL
             // braking uses several short, choppy steps; with the ball the steps are a little shorter.
             float startBoost = 0.4f * Mathf.Clamp01(forwardAccel / 7f) * Mathf.Clamp01(1f - speed / 8f);
             float brakeBoost = 0.45f * Mathf.Clamp01(-forwardAccel / 7f) * Mathf.Clamp01(speed / 2f);
-            float targetHz = baseHz + startBoost + brakeBoost + (hasBall ? 0.12f : 0f);
+            float targetHz = (baseHz + startBoost + brakeBoost + (hasBall ? 0.12f : 0f)) * CadenceScale;
             // Smooth the cadence so a sudden brake does not jump the gait clock.
             CycleHz = CycleHz <= 0f ? targetHz : Mathf.Lerp(CycleHz, targetHz, 1f - Mathf.Exp(-8f * dt));
             Braking = brakeBoost > 0.1f;
