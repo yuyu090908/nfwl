@@ -43,6 +43,21 @@ namespace NFWL
     /// <summary>Crystal materials, faceted textures, printed kit panels and the shard mesh.</summary>
     public static class CrystalArt
     {
+        /// <summary>Element preset by name (ICE, SAPPHIRE, AMETHYST, EMERALD, GOLD, VIOLET), as sent by the web platform.</summary>
+        public static bool TryElement(string name, out Element element)
+        {
+            switch ((name ?? "").Trim().ToUpperInvariant())
+            {
+                case "ICE": element = Element.Ice; return true;
+                case "SAPPHIRE": element = Element.Sapphire; return true;
+                case "AMETHYST": element = Element.Amethyst; return true;
+                case "EMERALD": element = Element.Emerald; return true;
+                case "GOLD": element = Element.Gold; return true;
+                case "VIOLET": element = Element.Violet; return true;
+                default: element = Element.Ice; return false;
+            }
+        }
+
         static Mesh shard;
         static Texture2D facets;
         static readonly Dictionary<string, Material> mats = new Dictionary<string, Material>();

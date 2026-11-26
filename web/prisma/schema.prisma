@@ -1,0 +1,749 @@
+// NFWL platform database.
+// Keeps three identities apart on purpose (Master Doc 10.1):
+//   Player.id        = in-game player UUID (exists for every player, NFT or not)
+//   ClubPlayer       = who currently holds the player in a club roster (ownership in the game)
+//   NFTAsset         = on-chain identity (chainId + contract + tokenId), only for minted players
+// Anything with economic value is written through TokenTransaction + TokenLedgerEntry (double entry,
+// idempotency key) so balances can be recomputed from the ledger (Master Doc 8.6).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ------------------------------------------------------------------ enums
+
+enum Position {
+  GK
+  DF
+  MF
+  FW
+}
+
+enum Rarity {
+  Common
+  Rare
+  Epic
+  Mythic
+  Legendary
+}
+
+/// Crystal element of a Crystalia player. Names match the Unity Element presets (CrystalArt.cs).
+enum CrystalType {
+  ICE
+  SAPPHIRE
+  AMETHYST
+  EMERALD
+  GOLD
+  VIOLET
+}
+
+/// CLUB = starter / reward player that can never be minted or traded (Full Spec 2.4).
+/// NFT_ELIGIBLE = may be minted later. Being minted is shown by an NFTAsset row, not by this flag.
+enum PlayerOrigin {
+  STARTER
+  REWARD
+  PRIMARY_SALE
+  DEMO
+}
+
+enum AccountProvider {
+  EMAIL
+  GOOGLE
+  DISCORD
+  WALLET_EVM
+}
+
+enum MatchMode {
+  PRACTICE_CPU
+  LEAGUE_SIM
+  FRIENDLY
+}
+
+enum MatchStatus {
+  SCHEDULED
+  IN_PROGRESS
+  FINISHED
+  VOID
+  REJECTED
+}
+
+/// How the result was established. Only SERVER_SIMULATED counts in an official season.
+enum ResultVerification {
+  PENDING
+  CLIENT_REPORTED
+  SERVER_SIMULATED
+  FLAGGED
+  REJECTED
+}
+
+enum MatchSessionStatus {
+  CREATED
+  LOADING
+  IN_PLAY
+  FINISHED
+  ABORTED
+  EXPIRED
+  REJECTED
+}
+
+enum SeasonStatus {
+  UPCOMING
+  ACTIVE
+  SETTLING
+  CLOSED
+}
+
+enum Currency {
+  /// Stage 1 off-chain NFWL Points: earned by play only, not purchasable, not transferable, not cashable.
+  NFWL_POINTS
+  /// Free Pick prediction score. No value at all, only titles/badges.
+  PICK_SCORE
+}
+
+enum LedgerAccountKind {
+  USER
+  SYSTEM_ISSUANCE
+  SYSTEM_SINK
+  SYSTEM_LOCKED
+}
+
+enum TxStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  REVERSED
+}
+
+enum ListingType {
+  FIXED_PRICE
+  AUCTION
+}
+
+enum ListingStatus {
+  DRAFT
+  ACTIVE
+  SOLD
+  CANCELLED
+  EXPIRED
+}
+
+enum PredictionPick {
+  HOME
+  DRAW
+  AWAY
+}
+
+enum PredictionStatus {
+  OPEN
+  WON
+  LOST
+  VOID
+}
+
+enum RewardKind {
+  XP
+  CLUB_XP
+  COSMETIC
+  BADGE
+  DEVELOPMENT_ITEM
+  SEASON
+  POINTS
+}
+
+// ------------------------------------------------------------------ auth
+
+model User {
+  id          String    @id @default(uuid()) @db.Uuid
+  email       String?   @unique
+  displayName String
+  /// Self-declared birth year. Real age checks are a legal-gate item (Master Doc 19).
+  birthYear   Int?
+  role        String    @default("user") // "user" | "admin"
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  disabledAt  DateTime?
+
+  accounts      Account[]
+  sessions      Session[]
+  club          Club?
+  ledgerAccount LedgerAccount[]
+  predictions   PredictionEntry[]
+  achievements  UserAchievement[]
+  listings      MarketplaceListing[] @relation("seller")
+  bids          AuctionBid[]
+  auditLogs     AuditLog[]
+  settings      Json                 @default("{}")
+}
+
+/// One row per way of signing in. Email accounts keep a scrypt hash; wallets keep the address.
+model Account {
+  id                String          @id @default(uuid()) @db.Uuid
+  userId            String          @db.Uuid
+  provider          AccountProvider
+  providerAccountId String
+  passwordHash      String?
+  createdAt         DateTime        @default(now())
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+/// Server-side sessions. Only a SHA-256 of the cookie token is stored.
+model Session {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  tokenHash  String   @unique
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+  lastSeenAt DateTime @default(now())
+  userAgent  String?
+  ip         String?
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// One-time nonces for wallet sign-in (SIWE) and OAuth state.
+model AuthNonce {
+  id        String    @id @default(uuid()) @db.Uuid
+  nonce     String    @unique
+  purpose   String
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  usedAt    DateTime?
+}
+
+// ------------------------------------------------------------------ club
+
+model Club {
+  id             String   @id @default(uuid()) @db.Uuid
+  ownerId        String   @unique @db.Uuid
+  name           String
+  shortName      String
+  /// Emblem built from presets (no image upload, Full Spec 5.1): {shape, symbol, colors[]}
+  logo           Json
+  colors         Json
+  level          Int      @default(1)
+  clubXp         Int      @default(0)
+  /// Rating points (Master Doc 4.2). Drives division movement.
+  rp             Int      @default(0)
+  /// Hidden matchmaking rating (Master Doc 4.6). Never shown on prediction screens.
+  mmr            Int      @default(1000)
+  divisionId     Int
+  isDemo         Boolean  @default(false)
+  onboardingStep Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  owner       User                @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  division    Division            @relation(fields: [divisionId], references: [id])
+  roster      ClubPlayer[]
+  squads      Squad[]
+  homeMatches Match[]             @relation("homeClub")
+  awayMatches Match[]             @relation("awayClub")
+  standings   LeagueStanding[]
+  rewards     RewardTransaction[]
+
+  @@index([divisionId, rp])
+  @@index([name])
+}
+
+// ------------------------------------------------------------------ players
+
+/// Operator-made Crystalia designs that starter / reward players are drawn from (prompt 8, 14).
+model PlayerTemplate {
+  id          String      @id @default(uuid()) @db.Uuid
+  code        String      @unique
+  name        String
+  position    Position
+  crystalType CrystalType
+  rarity      Rarity      @default(Common)
+  /// Base attribute value the generator centers on (Unity PlayerAttributes.Random(baseLevel)).
+  baseLevel   Int
+  /// Pool this template belongs to, e.g. "starter-common".
+  pool        String
+  active      Boolean     @default(true)
+  appearance  Json        @default("{}")
+  createdAt   DateTime    @default(now())
+  players     Player[]
+
+  @@index([pool, position, active])
+}
+
+model Player {
+  id            String       @id @default(uuid()) @db.Uuid
+  templateId    String?      @db.Uuid
+  name          String
+  position      Position
+  /// Up to two sub positions (Full Spec 6.1).
+  subPositions  Position[]
+  rarity        Rarity       @default(Common)
+  crystalType   CrystalType
+  preferredFoot String       @default("Right")
+  weakFoot      Int          @default(3)
+  level         Int          @default(1)
+  /// Current level cap; raised by a breakthrough upgrade.
+  levelCap      Int          @default(10)
+  xp            Int          @default(0)
+  growthPoints  Int          @default(0)
+  origin        PlayerOrigin
+  appearance    Json         @default("{}")
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  template   PlayerTemplate?      @relation(fields: [templateId], references: [id])
+  attributes PlayerAttributes?
+  skills     PlayerSkill[]
+  ownership  ClubPlayer[]
+  nft        NFTAsset?
+  experience PlayerExperience[]
+  upgrades   PlayerUpgrade[]
+  stats      MatchStatistic[]
+  listings   MarketplaceListing[]
+
+  @@index([rarity, position])
+}
+
+/// The 10 attributes used by the Unity match engine (PlayerAttributes, range 40..99).
+model PlayerAttributes {
+  playerId     String @id @db.Uuid
+  speed        Int
+  acceleration Int
+  agility      Int
+  ballControl  Int
+  shortPass    Int
+  longPass     Int
+  shotPower    Int
+  finishing    Int
+  tackling     Int
+  goalkeeping  Int
+  player       Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+}
+
+/// Skill catalog. Effects live in `effect` JSON (server config). `unitySkillId` is set only for
+/// skills the current Unity build implements (SkillId enum); others are display-only for now.
+model Skill {
+  id           String        @id
+  name         String
+  description  String
+  minRarity    Rarity        @default(Epic)
+  positions    Position[]
+  unitySkillId String?
+  effect       Json
+  players      PlayerSkill[]
+}
+
+model PlayerSkill {
+  playerId   String   @db.Uuid
+  skillId    String
+  slot       Int
+  acquiredAt DateTime @default(now())
+  player     Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  skill      Skill    @relation(fields: [skillId], references: [id])
+
+  @@id([playerId, skillId])
+  @@unique([playerId, slot])
+}
+
+/// Roster membership = in-game ownership. One active row per player.
+model ClubPlayer {
+  id          String    @id @default(uuid()) @db.Uuid
+  clubId      String    @db.Uuid
+  playerId    String    @db.Uuid
+  joinedAt    DateTime  @default(now())
+  leftAt      DateTime?
+  /// Set while listed / in a locked match (Master Doc 10.7).
+  lockedUntil DateTime?
+  lockReason  String?
+  active      Boolean   @default(true)
+  club        Club      @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  player      Player    @relation(fields: [playerId], references: [id])
+
+  @@index([clubId, active])
+  @@index([playerId, active])
+}
+
+model Formation {
+  id     String  @id
+  name   String
+  /// Slots in Unity formation order: [{role, x, y}] (GK, DF, DF, MF, FW for 2-1-1)
+  slots  Json
+  squads Squad[]
+}
+
+model Squad {
+  id          String    @id @default(uuid()) @db.Uuid
+  clubId      String    @db.Uuid
+  name        String    @default("Main")
+  formationId String
+  /// Ordered player ids, one per formation slot.
+  starters    String[]  @db.Uuid
+  bench       String[]  @db.Uuid
+  isActive    Boolean   @default(true)
+  updatedAt   DateTime  @updatedAt
+  club        Club      @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  formation   Formation @relation(fields: [formationId], references: [id])
+
+  @@index([clubId, isActive])
+}
+
+// ------------------------------------------------------------------ league
+
+model Division {
+  /// 0 = Champions League, 1..10 = Division 1..10.
+  id        Int              @id
+  name      String
+  minRp     Int?
+  maxRp     Int?
+  clubs     Club[]
+  standings LeagueStanding[]
+}
+
+model Season {
+  id        Int              @id @default(autoincrement())
+  number    Int              @unique
+  startsAt  DateTime
+  endsAt    DateTime
+  status    SeasonStatus     @default(UPCOMING)
+  /// An official season only counts SERVER_SIMULATED (or otherwise verified) results.
+  /// A beta season also counts plausible CLIENT_REPORTED results, shown as provisional.
+  official  Boolean          @default(false)
+  config    Json             @default("{}")
+  matches   Match[]
+  standings LeagueStanding[]
+}
+
+model LeagueStanding {
+  id           String   @id @default(uuid()) @db.Uuid
+  seasonId     Int
+  divisionId   Int
+  clubId       String   @db.Uuid
+  played       Int      @default(0)
+  wins         Int      @default(0)
+  draws        Int      @default(0)
+  losses       Int      @default(0)
+  goalsFor     Int      @default(0)
+  goalsAgainst Int      @default(0)
+  points       Int      @default(0)
+  provisional  Int      @default(0)
+  updatedAt    DateTime @updatedAt
+  season       Season   @relation(fields: [seasonId], references: [id])
+  division     Division @relation(fields: [divisionId], references: [id])
+  club         Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  @@unique([seasonId, clubId])
+  @@index([seasonId, divisionId, points])
+}
+
+// ------------------------------------------------------------------ matches
+
+model Match {
+  id           String             @id @default(uuid()) @db.Uuid
+  seasonId     Int?
+  mode         MatchMode
+  status       MatchStatus        @default(SCHEDULED)
+  verification ResultVerification @default(PENDING)
+  homeClubId   String?            @db.Uuid
+  awayClubId   String?            @db.Uuid
+  /// CPU opponent description when there is no away club (PRACTICE_CPU).
+  cpuOpponent  Json?
+  homeScore    Int?
+  awayScore    Int?
+  kickoffAt    DateTime?
+  finishedAt   DateTime?
+  /// Whether the result was applied to standings / XP (applied exactly once).
+  appliedAt    DateTime?
+  seed         Int
+  anomalies    Json               @default("[]")
+  createdAt    DateTime           @default(now())
+
+  season      Season?           @relation(fields: [seasonId], references: [id])
+  homeClub    Club?             @relation("homeClub", fields: [homeClubId], references: [id])
+  awayClub    Club?             @relation("awayClub", fields: [awayClubId], references: [id])
+  events      MatchEvent[]
+  statistics  MatchStatistic[]
+  session     MatchSession?
+  predictions PredictionEntry[]
+
+  @@index([homeClubId, createdAt])
+  @@index([awayClubId, createdAt])
+  @@index([status, kickoffAt])
+  @@index([seasonId, status])
+}
+
+/// A single play of a match in a browser. Carries the frozen lineup sent to Unity.
+model MatchSession {
+  id           String             @id @default(uuid()) @db.Uuid
+  matchId      String             @unique @db.Uuid
+  userId       String             @db.Uuid
+  status       MatchSessionStatus @default(CREATED)
+  /// Exactly what was sent to Unity (no secrets).
+  clientConfig Json
+  halfSeconds  Int
+  createdAt    DateTime           @default(now())
+  loadedAt     DateTime?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  expiresAt    DateTime
+  lastSeq      Int                @default(0)
+  pausedMs     Int                @default(0)
+  match        Match              @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model MatchEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  matchId    String   @db.Uuid
+  /// Bridge messageId; unique per match so a resent message is ignored.
+  messageId  String
+  eventType  String
+  seq        Int?
+  gameClock  Float?
+  payload    Json
+  receivedAt DateTime @default(now())
+  match      Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, messageId])
+  @@index([matchId, receivedAt])
+}
+
+model MatchStatistic {
+  id        String  @id @default(uuid()) @db.Uuid
+  matchId   String  @db.Uuid
+  playerId  String? @db.Uuid
+  clubId    String? @db.Uuid
+  side      String
+  slot      Int?
+  goals     Int     @default(0)
+  assists   Int     @default(0)
+  saves     Int     @default(0)
+  minutes   Int     @default(0)
+  xpAwarded Int     @default(0)
+  match     Match   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player    Player? @relation(fields: [playerId], references: [id])
+
+  @@unique([matchId, side, slot])
+  @@index([playerId])
+}
+
+// ------------------------------------------------------------------ growth
+
+/// XP grants. (matchId, playerId) unique: XP from one match is given once (Full Spec 6.6).
+model PlayerExperience {
+  id        String   @id @default(uuid()) @db.Uuid
+  playerId  String   @db.Uuid
+  matchId   String?  @db.Uuid
+  source    String
+  amount    Int
+  levelFrom Int
+  levelTo   Int
+  createdAt DateTime @default(now())
+  player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([playerId, matchId, source])
+  @@index([playerId, createdAt])
+}
+
+model PlayerUpgrade {
+  id             String   @id @default(uuid()) @db.Uuid
+  playerId       String   @db.Uuid
+  kind           String
+  idempotencyKey String   @unique
+  before         Json
+  after          Json
+  tokenTxId      String?  @db.Uuid
+  status         TxStatus @default(PENDING)
+  testMode       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  player         Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@index([playerId, createdAt])
+}
+
+model RewardTransaction {
+  id             String     @id @default(uuid()) @db.Uuid
+  clubId         String     @db.Uuid
+  kind           RewardKind
+  amount         Int        @default(0)
+  itemCode       String?
+  reason         String
+  sourceRef      String?
+  idempotencyKey String     @unique
+  createdAt      DateTime   @default(now())
+  club           Club       @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  @@index([clubId, createdAt])
+}
+
+// ------------------------------------------------------------------ ledger
+
+model LedgerAccount {
+  id        String             @id @default(uuid()) @db.Uuid
+  kind      LedgerAccountKind
+  currency  Currency
+  userId    String?            @db.Uuid
+  /// Cached balance; must equal the sum of entries (checked by verifyLedger()).
+  balance   Int                @default(0)
+  updatedAt DateTime           @updatedAt
+  user      User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries   TokenLedgerEntry[]
+
+  @@unique([kind, currency, userId])
+}
+
+model TokenTransaction {
+  id             String             @id @default(uuid()) @db.Uuid
+  idempotencyKey String             @unique
+  currency       Currency
+  kind           String
+  status         TxStatus           @default(PENDING)
+  /// Off-chain Stage 1 points are always testMode=false here but onChain=false.
+  onChain        Boolean            @default(false)
+  chainId        Int?
+  txHash         String?
+  confirmations  Int?
+  memo           String?
+  createdAt      DateTime           @default(now())
+  confirmedAt    DateTime?
+  entries        TokenLedgerEntry[]
+
+  @@index([kind, createdAt])
+}
+
+/// Double entry: the amounts of a transaction sum to zero.
+model TokenLedgerEntry {
+  id            String           @id @default(uuid()) @db.Uuid
+  transactionId String           @db.Uuid
+  accountId     String           @db.Uuid
+  amount        Int
+  createdAt     DateTime         @default(now())
+  transaction   TokenTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  account       LedgerAccount    @relation(fields: [accountId], references: [id])
+
+  @@index([accountId])
+}
+
+// ------------------------------------------------------------------ NFT & market
+
+model NFTAsset {
+  id           String    @id @default(uuid()) @db.Uuid
+  playerId     String    @unique @db.Uuid
+  chainId      Int
+  contract     String
+  tokenId      String
+  metadataUri  String?
+  ownerAddress String?
+  /// Last time ownerAddress was verified against the chain.
+  verifiedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  player       Player    @relation(fields: [playerId], references: [id])
+
+  @@unique([chainId, contract, tokenId])
+}
+
+model MarketplaceListing {
+  id           String        @id @default(uuid()) @db.Uuid
+  playerId     String        @db.Uuid
+  sellerId     String        @db.Uuid
+  type         ListingType
+  status       ListingStatus @default(DRAFT)
+  currency     String        @default("UNSET")
+  price        Decimal?      @db.Decimal(38, 0)
+  startPrice   Decimal?      @db.Decimal(38, 0)
+  minIncrement Decimal?      @db.Decimal(38, 0)
+  endsAt       DateTime?
+  /// Signed order (EIP-712 or chain equivalent) once a chain is chosen.
+  signature    String?
+  version      Int           @default(0)
+  isDemo       Boolean       @default(false)
+  createdAt    DateTime      @default(now())
+  soldAt       DateTime?
+  player       Player        @relation(fields: [playerId], references: [id])
+  seller       User          @relation("seller", fields: [sellerId], references: [id])
+  bids         AuctionBid[]
+
+  @@index([status, type, createdAt])
+  @@index([playerId, status])
+}
+
+model AuctionBid {
+  id        String             @id @default(uuid()) @db.Uuid
+  listingId String             @db.Uuid
+  bidderId  String             @db.Uuid
+  amount    Decimal            @db.Decimal(38, 0)
+  createdAt DateTime           @default(now())
+  listing   MarketplaceListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  bidder    User               @relation(fields: [bidderId], references: [id])
+
+  @@index([listingId, amount])
+}
+
+// ------------------------------------------------------------------ predictions
+
+model PredictionEntry {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  matchId   String           @db.Uuid
+  pick      PredictionPick
+  status    PredictionStatus @default(OPEN)
+  /// Free Pick score awarded (PICK_SCORE, no value).
+  score     Int              @default(0)
+  createdAt DateTime         @default(now())
+  settledAt DateTime?
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  match     Match            @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, matchId])
+  @@index([matchId, status])
+}
+
+// ------------------------------------------------------------------ achievements & audit
+
+model Achievement {
+  id          String            @id
+  name        String
+  description String
+  category    String
+  icon        String
+  users       UserAchievement[]
+}
+
+model UserAchievement {
+  userId        String      @db.Uuid
+  achievementId String
+  earnedAt      DateTime    @default(now())
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement   Achievement @relation(fields: [achievementId], references: [id])
+
+  @@id([userId, achievementId])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String?  @db.Uuid
+  action    String
+  target    String?
+  severity  String   @default("info")
+  data      Json     @default("{}")
+  ip        String?
+  createdAt DateTime @default(now())
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// Operator settings (league points, XP rules, caps...). Key "game" holds GameConfig JSON.
+model GameConfig {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
