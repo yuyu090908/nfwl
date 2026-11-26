@@ -20,6 +20,10 @@ namespace NFWL
         public bool hasRarity;
         public Rarity rarity = Rarity.Common;
         public List<SkillId> skills = new List<SkillId>();
+        /// <summary>Crystal element name from the web platform (ICE, SAPPHIRE, ...). Empty keeps the slot's element.</summary>
+        public string element = "";
+        /// <summary>Shirt number from the web platform. 0 keeps the slot's number.</summary>
+        public int number;
         /// <summary>Ability values given by the source (lower-case key -> value). Others keep the generated value.</summary>
         public readonly Dictionary<string, float> traits = new Dictionary<string, float>();
 
@@ -164,6 +168,10 @@ namespace NFWL
             {
                 case "name": d.name = value; return;
                 case "tokenid": case "id": d.tokenId = value; return;
+                case "element": d.element = value; return;
+                case "number":
+                    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int num) && num > 0 && num < 100) d.number = num;
+                    return;
                 case "rarity":
                     if (Enum.TryParse(value, true, out Rarity r)) { d.rarity = r; d.hasRarity = true; }
                     return;

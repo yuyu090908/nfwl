@@ -20,3 +20,6 @@ Plugins/*/Intermediate/
 # OS
 .DS_Store
 Thumbs.db
+
+# Unity WebGL output (NFWL > Build WebGL)
+unity/NFWL/Builds/

@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ NFWL design tokens
+   Palette from the master prompt (2.2). Everything in the UI reads these tokens;
+   components never hard-code hex values. */
+@theme {
+  --color-bg: #080b12;
+  --color-bg-2: #101624;
+  --color-card: #171e2d;
+  --color-card-2: #1d2638;
+  --color-line: #263049;
+  --color-gold: #d5ac59;
+  --color-crystal: #44d9ff;
+  --color-epic: #9258ff;
+  --color-mythic: #ff465f;
+  --color-legendary: #f3c65a;
+  --color-common: #c9d1de;
+  --color-ink: #f7f8fb;
+  --color-ink-2: #a1aabd;
+  --color-ink-3: #6b7489;
+  --color-success: #3ddc97;
+  --color-warning: #ffb547;
+  --color-danger: #ff465f;
+
+  --font-sans: var(--font-inter), "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+  --font-display: var(--font-chakra), var(--font-inter), "Hiragino Sans", "Noto Sans JP", sans-serif;
+
+  --radius-card: 14px;
+  --shadow-glow: 0 0 0 1px rgb(68 217 255 / 0.25), 0 8px 40px -8px rgb(68 217 255 / 0.25);
+  --shadow-gold: 0 0 0 1px rgb(213 172 89 / 0.35), 0 8px 40px -10px rgb(213 172 89 / 0.35);
+
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  background: var(--color-bg);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgb(68 217 255 / 0.07), transparent 60%),
+    radial-gradient(900px 500px at -10% 10%, rgb(146 88 255 / 0.07), transparent 60%),
+    var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-crystal);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+::selection {
+  background: rgb(68 217 255 / 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@utility font-display {
+  font-family: var(--font-display);
+  letter-spacing: 0.02em;
+}
+
+@utility text-gradient-gold {
+  background: linear-gradient(180deg, #fff4d6 0%, #f3c65a 45%, #b98a35 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@utility crystal-border {
+  border: 1px solid rgb(68 217 255 / 0.18);
+}
+
+@utility skeleton {
+  background: linear-gradient(90deg, var(--color-card) 0%, var(--color-card-2) 50%, var(--color-card) 100%);
+  background-size: 200% 100%;
+  animation: var(--animate-shimmer);
+}
+
+@utility pitch-grass {
+  background:
+    repeating-linear-gradient(0deg, rgb(255 255 255 / 0.025) 0 10%, transparent 10% 20%),
+    radial-gradient(ellipse at center, #1c5a3a 0%, #123d29 70%, #0d2c1e 100%);
+}

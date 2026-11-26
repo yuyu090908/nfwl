@@ -227,9 +227,17 @@ namespace NFWL
                         if (data.hasRarity) rarity = data.rarity;
                         if (!string.IsNullOrEmpty(data.name)) name = data.name;
                     }
-                    PlayerController p = PlayerController.Create(t, s.role, s.number, name,
+                    // Web platform data may also choose the crystal element and shirt number (Web/WebBridge.cs).
+                    Element element = t == 0 ? homeElements[i] : awayElements[i];
+                    int number = s.number;
+                    if (data != null)
+                    {
+                        if (CrystalArt.TryElement(data.element, out Element e)) element = e;
+                        if (data.number > 0) number = data.number;
+                    }
+                    PlayerController p = PlayerController.Create(t, s.role, number, name,
                         rarity, attrs, kit,
-                        t == 0 ? homeElements[i] : awayElements[i], rnd.Next(0, 4),
+                        element, rnd.Next(0, 4),
                         0.97f + (float)rnd.NextDouble() * 0.08f);
                     if (data != null) p.SetSkills(data.skills);
                     p.formationSpot = s.spot;
